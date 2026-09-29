@@ -77,7 +77,7 @@ Errors come back as `{ "error": "<code>", "message": "<text>" }`, for example `4
 ## Progress
 
 - [x] Domain types (`Ledger.Money`, `Ledger.Types`)
-- [ ] Pure core and STM store
+- [x] Pure core and STM store
 - [ ] HTTP layer and executable
 - [ ] Tests
 - [ ] Front end

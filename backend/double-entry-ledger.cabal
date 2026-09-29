@@ -11,9 +11,13 @@ library
   ghc-options:      -Wall
   hs-source-dirs:   src
   exposed-modules:
+      Ledger.Core
       Ledger.Money
+      Ledger.Store
       Ledger.Types
   build-depends:
       base >=4.14 && <5
     , aeson >=2.0
+    , containers
+    , stm
     , text
