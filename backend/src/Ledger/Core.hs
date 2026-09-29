@@ -19,6 +19,7 @@ module Ledger.Core
   , listAccounts
   , balanceOf
   , entriesFor
+  , checkTransfer
   , applyTransfer
   , totalOfAllBalances
   , allBalances
@@ -139,34 +140,57 @@ allBalances = ledgerBalances
 totalOfAllBalances :: Ledger -> Cents
 totalOfAllBalances = foldl' (+) 0 . Map.elems . ledgerBalances
 
--- | Validate and apply a transfer. Either the whole thing happens (two
--- entries, both balances updated) or nothing does.
+-- | The transfer rules, on their own: given the request, the two accounts
+-- (Nothing if an account doesn't exist) and the sender's current balance,
+-- is this transfer allowed?
+--
+-- Both stores call this: applyTransfer below (in-memory) and
+-- Ledger.Store.Postgres (which loads the two accounts from the database).
+-- So the rules are written exactly once, and the property tests that
+-- exercise applyTransfer also cover the Postgres store's decisions.
 --
 -- This "do" block runs in Either. Each line either succeeds and moves on, or
 -- produces a Left, which STOPS the block and becomes the function's result.
 -- It works like a series of guard clauses:
 --   if (!from) return error; if (!to) return error; if (same) return error...
 -- except the type makes it impossible to forget to return, or to skip a check.
-applyTransfer :: TransferRequest -> Ledger -> Either TransferError (Transfer, Ledger)
-applyTransfer req ledger = do
+checkTransfer :: TransferRequest -> Maybe Account -> Maybe Account -> Cents -> Either TransferError ()
+checkTransfer req mFrom mTo fromBalance = do
   -- "x <- action" runs the action and, if it's a Right, names the value
   -- inside x. If it's a Left, the whole do block stops here with that error.
-  fromAcct <- findAccount (reqFrom req)
+  fromAcct <- found (reqFrom req) mFrom
   -- "_ <-" means "run the check, but I don't need the value".
-  _ <- findAccount (reqTo req)
+  _ <- found (reqTo req) mTo
   -- A check that returns no value: Left stops everything, Right () carries
   -- on. "()" is the "unit" value, Haskell's equivalent of void.
   if reqFrom req == reqTo req then Left SameAccount else Right ()
-  -- "let" inside a do block just names values. These can't fail.
+  -- "let" inside a do block just names values. It can't fail.
   let amount = unAmount (reqAmount req)
-      fromBalance = Map.findWithDefault 0 (reqFrom req) (ledgerBalances ledger)
   -- The overdraft rule: customers can't go below zero; External can.
+  -- The last line of the block is the result: Left (stop) or Right ().
   if accountKind fromAcct == Customer && fromBalance < amount
     then Left (InsufficientFunds {available = fromBalance, requested = amount})
     else Right ()
+  where
+    -- Turns "Maybe Account" into "Either TransferError Account", so a
+    -- missing account becomes an error the do block understands.
+    -- "maybe default f m": if m is Nothing, use default; if Just x, use f x.
+    found aid = maybe (Left (UnknownAccount aid)) Right
+
+-- | Validate and apply a transfer. Either the whole thing happens (two
+-- entries, both balances updated) or nothing does.
+applyTransfer :: TransferRequest -> Ledger -> Either TransferError (Transfer, Ledger)
+applyTransfer req ledger = do
+  -- Run the rules. A Left here stops the whole do block with that error.
+  checkTransfer
+    req
+    (lookupAccount (reqFrom req) ledger)
+    (lookupAccount (reqTo req) ledger)
+    (Map.findWithDefault 0 (reqFrom req) (ledgerBalances ledger))
   -- Every check passed. Now build the results. Still nothing is modified:
   -- ledger' (read "ledger prime") is a brand-new ledger value.
-  let tid = TransferId (ledgerNextTransferId ledger)
+  let amount = unAmount (reqAmount req)
+      tid = TransferId (ledgerNextTransferId ledger)
       transfer = Transfer tid (reqFrom req) (reqTo req) amount (reqMemo req)
       -- The two sides of double-entry: they always sum to zero.
       debit = Entry tid (reqFrom req) (negate amount)
@@ -190,8 +214,3 @@ applyTransfer req ledger = do
           }
   -- "pure" wraps the final result in Right. It's the success case.
   pure (transfer, ledger')
-  where
-    -- A helper that turns "Maybe Account" into "Either TransferError Account",
-    -- so a missing account becomes an error the do block understands.
-    -- "maybe default f m": if m is Nothing, use default; if Just x, use f x.
-    findAccount aid = maybe (Left (UnknownAccount aid)) Right (lookupAccount aid ledger)

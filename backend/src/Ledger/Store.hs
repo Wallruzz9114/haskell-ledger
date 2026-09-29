@@ -1,6 +1,6 @@
 -- | The storage boundary, written as a record of functions. Handlers depend
--- on this record, not on a concrete database, so tests (or a future Postgres
--- implementation) can swap in their own version without touching the core.
+-- on this record, not on a concrete database, so the in-memory store (here)
+-- and the Postgres store (Ledger.Store.Postgres) are interchangeable.
 --
 -- This is the first file with IO: the ledger now lives somewhere and changes
 -- over time. Ledger.Core stays pure; this file wraps it in a place to keep
@@ -33,9 +33,10 @@ import Ledger.Types
 -- produces an x". It's roughly like Promise<x>: a description of work, not
 -- the work itself.
 --
--- Anything that needs storage takes a LedgerStore. The real app passes the
--- in-memory one below; a Postgres version could be swapped in later without
--- changing any caller. This is dependency injection with no framework.
+-- Anything that needs storage takes a LedgerStore. There are two
+-- implementations: the in-memory one below, and Ledger.Store.Postgres.
+-- Main picks one at startup; no caller knows or cares which it got. This is
+-- dependency injection with no framework.
 data LedgerStore = LedgerStore
   { storeOpenAccount :: AccountId -> Text -> AccountKind -> IO (Either OpenAccountError Account)
   , storeGetAccount :: AccountId -> IO (Maybe (Account, Cents))
@@ -43,7 +44,6 @@ data LedgerStore = LedgerStore
   , storeEntries :: AccountId -> IO (Maybe [Entry])
   , -- "Maybe IdempotencyKey": the key is optional, the client may not send one.
     storeTransfer :: Maybe IdempotencyKey -> TransferRequest -> IO (Either TransferError Transfer)
-  , storeSnapshot :: IO Ledger
   }
 
 -- | Remembered outcome of a request made with an idempotency key. We keep the
@@ -136,5 +136,4 @@ newInMemoryStore = do
                 Just key -> modifyTVar' keysVar (Map.insert key (Remembered req outcome))
                 Nothing -> pure ()
               pure outcome
-      , storeSnapshot = readTVarIO ledgerVar
       }

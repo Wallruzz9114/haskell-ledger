@@ -26,7 +26,7 @@ module Ledger.Types
 
 -- "ToJSON (..)" imports the class AND its methods (we need its toJSON method
 -- below). "Options (..)" imports the type and its fields (fieldLabelModifier).
-import Data.Aeson (FromJSON, Options (..), ToJSON (..), defaultOptions, genericToJSON)
+import Data.Aeson (FromJSON (..), Options (..), ToJSON (..), defaultOptions, genericParseJSON, genericToJSON)
 import Data.Char (toLower)
 -- Text is the string type real Haskell code uses. The built-in String is a
 -- linked list of characters, which is slow; Text is a packed, efficient string.
@@ -93,6 +93,8 @@ newtype TransferId = TransferId Integer
 
 instance ToJSON TransferId
 
+instance FromJSON TransferId
+
 -- | A client-chosen key sent in the Idempotency-Key HTTP header. If the same
 -- request arrives twice with the same key (a double-click, a network retry),
 -- the money moves only once.
@@ -141,6 +143,12 @@ data Transfer = Transfer
 instance ToJSON Transfer where
   toJSON = genericToJSON (stripPrefix 8)
 
+-- The matching parser, with the same options so the field names line up.
+-- The Postgres store uses it to read back a remembered transfer outcome
+-- (see Ledger.Store.Postgres). The API itself never receives a Transfer.
+instance FromJSON Transfer where
+  parseJSON = genericParseJSON (stripPrefix 8)
+
 -- | What someone ASKS for: "move this much from A to B".
 --
 -- reqAmount is an Amount, not Cents. Since the only way to get an Amount is
@@ -174,7 +182,16 @@ data TransferError
   | SameAccount
   | InsufficientFunds {available :: Cents, requested :: Cents}
   | IdempotencyKeyReused
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
+
+-- JSON for errors is NOT what the API sends (Ledger.App builds its own
+-- { "error", "message" } bodies). It's how the Postgres store saves the
+-- outcome of a request made with an idempotency key, so a retry can be
+-- answered with exactly the same error. The generic encoding looks like
+--   {"tag": "InsufficientFunds", "available": 0, "requested": 100}
+instance ToJSON TransferError
+
+instance FromJSON TransferError
 
 -- | Opening an account can only fail one way, so this has one constructor.
 -- A type with exactly one constructor holding one value can be a newtype.

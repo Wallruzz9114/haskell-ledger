@@ -5,6 +5,9 @@ version:            0.1.0.0
 synopsis:           A small double-entry ledger API in Haskell
 license:            MIT
 build-type:         Simple
+-- Files that aren't Haskell but are baked into the program at compile time
+-- (see Ledger.Db). Listing them makes cabal rebuild when they change.
+extra-source-files: db/migrations/*.sql
 
 -- A "common stanza" is a block of settings that other sections pull in with
 -- "import: shared", so the same options aren't repeated three times.
@@ -16,6 +19,7 @@ common shared
   build-depends:
       base >=4.14 && <5
     , aeson >=2.0
+    , bytestring
     , containers
     , mtl
     , stm
@@ -30,11 +34,18 @@ library
   exposed-modules:
       Ledger.App
       Ledger.Core
+      Ledger.Db
       Ledger.Money
       Ledger.Store
+      Ledger.Store.Postgres
       Ledger.Types
   build-depends:
-      http-types
+      file-embed
+    , http-types
+    -- The Postgres driver (needs libpq, Postgres's C client library) and a
+    -- connection pool.
+    , postgresql-simple >=0.6 && <0.8
+    , resource-pool >=0.4 && <0.6
     -- Pinned: Scotty 0.20+ changed its API, and this code targets 0.12.
     , scotty >=0.12 && <0.13
     , transformers
@@ -65,4 +76,6 @@ test-suite spec
       double-entry-ledger
     , async
     , hspec
+    , postgresql-simple
     , QuickCheck
+    , resource-pool
