@@ -1,0 +1,14 @@
+# Haskell
+dist-newstyle/
+*.hi
+*.o
+.ghc.environment.*
+
+# Node
+node_modules/
+web/dist/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
