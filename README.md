@@ -137,7 +137,7 @@ Errors come back as `{ "error": "<code>", "message": "<text>" }`:
 
 ## Repository layout
 
-```
+```text
 haskell-ledger/
   cabal.project              # points cabal and the editor at backend/
   backend/
