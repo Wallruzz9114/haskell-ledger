@@ -1,23 +1,68 @@
 cabal-version:      3.0
+-- The package's name and version, like "name" and "version" in package.json.
 name:               double-entry-ledger
 version:            0.1.0.0
+synopsis:           A small double-entry ledger API in Haskell
+license:            MIT
 build-type:         Simple
 
--- Temporary minimal version so the editor can type-check while you work
--- through Steps 4-5. Replace this whole file with the tutorial's version in
--- Step 6. Add each new module to exposed-modules as you create it.
-library
+-- A "common stanza" is a block of settings that other sections pull in with
+-- "import: shared", so the same options aren't repeated three times.
+common shared
   default-language: Haskell2010
+  -- -Wall turns on (nearly) all warnings: missing cases, unused imports...
   ghc-options:      -Wall
+  -- Packages every component needs, like "dependencies" in package.json.
+  build-depends:
+      base >=4.14 && <5
+    , aeson >=2.0
+    , containers
+    , mtl
+    , stm
+    , text
+
+-- The library: all the real code, in src/. The executable and the tests
+-- below both depend on it, so the logic is written once and shared.
+library
+  import:           shared
   hs-source-dirs:   src
+  -- Every module must be listed here, or cabal silently won't compile it.
   exposed-modules:
+      Ledger.App
       Ledger.Core
       Ledger.Money
       Ledger.Store
       Ledger.Types
   build-depends:
-      base >=4.14 && <5
-    , aeson >=2.0
-    , containers
-    , stm
-    , text
+      http-types
+    -- Pinned: Scotty 0.20+ changed its API, and this code targets 0.12.
+    , scotty >=0.12 && <0.13
+    , transformers
+    , wai
+
+-- The program you run: "cabal run ledger-api". Its main function is in
+-- app/Main.hs.
+executable ledger-api
+  import:           shared
+  hs-source-dirs:   app
+  main-is:          Main.hs
+  -- -threaded uses the multi-core runtime, so the web server can handle
+  -- requests in parallel.
+  ghc-options:      -threaded -rtsopts
+  build-depends:
+      double-entry-ledger
+    , warp
+
+-- The test suite: "cabal test". Written in Step 7.
+test-suite spec
+  import:           shared
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Spec.hs
+  -- -N runs on all CPU cores, which the concurrency test relies on.
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      double-entry-ledger
+    , async
+    , hspec
+    , QuickCheck
