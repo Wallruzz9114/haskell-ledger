@@ -53,8 +53,6 @@ library
     , file-embed
     , http-types
     , ram
-    -- Argon2 password hashing.
-    , password
     -- The Postgres driver (needs libpq, Postgres's C client library) and a
     -- connection pool.
     , postgresql-simple >=0.6 && <0.8
