@@ -61,7 +61,7 @@ storeContract emptyStore = do
     storeGetAccount store (AccountId "nobody") `shouldReturn` Nothing
     storeEntries store (AccountId "nobody") `shouldReturn` Nothing
     storeEntries store carol `shouldReturn` Just []
-    storeOpenAccount store alice "again" Customer `shouldReturn` Left (AccountAlreadyExists alice)
+    storeOpenAccount store alice "again" Customer Nothing `shouldReturn` Left (AccountAlreadyExists alice)
 
   it "lists accounts in id order with their balances" $ do
     store <- seeded
@@ -100,7 +100,7 @@ storeContract emptyStore = do
       -- mapM_ runs an action for each list element and discards the results
       -- (like forEach with an async callback).
       mapM_
-        (\(aid, kind) -> storeOpenAccount store aid (T.pack (show aid)) kind)
+        (\(aid, kind) -> storeOpenAccount store aid (T.pack (show aid)) kind Nothing)
         ((external, External) : [(c, Customer) | c <- customers])
       _ <- storeTransfer store Nothing (transfer external alice 1000)
       pure store

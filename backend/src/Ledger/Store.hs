@@ -8,6 +8,8 @@
 module Ledger.Store
   ( LedgerStore (..)
   , newInMemoryStore
+  , UserStore (..)
+  , newInMemoryUserStore
   ) where
 
 -- STM = Software Transactional Memory: TVar, atomically, readTVar, etc.
@@ -16,8 +18,10 @@ import Control.Concurrent.STM
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import Ledger.Core
 import Ledger.Money (Cents)
+import Ledger.Session (TokenHash)
 import Ledger.Types
 
 -- | Everything the rest of the app can do with stored data.
@@ -38,7 +42,7 @@ import Ledger.Types
 -- Main picks one at startup; no caller knows or cares which it got. This is
 -- dependency injection with no framework.
 data LedgerStore = LedgerStore
-  { storeOpenAccount :: AccountId -> Text -> AccountKind -> IO (Either OpenAccountError Account)
+  { storeOpenAccount :: AccountId -> Text -> AccountKind -> Maybe Username -> IO (Either OpenAccountError Account)
   , storeGetAccount :: AccountId -> IO (Maybe (Account, Cents))
   , storeListAccounts :: IO [(Account, Cents)]
   , storeEntries :: AccountId -> IO (Maybe [Entry])
@@ -78,11 +82,11 @@ newInMemoryStore = do
       { -- "\aid name kind -> ..." is a lambda: (aid, name, kind) => ...
         -- "atomically $ do ..." runs the whole block as ONE transaction:
         -- other threads either see all of it or none of it.
-        storeOpenAccount = \aid name kind -> atomically $ do
+        storeOpenAccount = \aid name kind owner -> atomically $ do
           ledger <- readTVar ledgerVar
           -- "case" is pattern matching on a value: a switch that can also
           -- unpack the data inside each alternative.
-          case openAccount aid name kind ledger of
+          case openAccount aid name kind owner ledger of
             Left err -> pure (Left err)
             Right (account, ledger') -> do
               writeTVar ledgerVar ledger'
@@ -136,4 +140,54 @@ newInMemoryStore = do
                 Just key -> modifyTVar' keysVar (Map.insert key (Remembered req outcome))
                 Nothing -> pure ()
               pure outcome
+      }
+
+-- Users and sessions ---------------------------------------------------------------
+
+-- | Everything the app needs to know about users and logins. A separate
+-- record from LedgerStore: money and logins are different concerns, and a
+-- test of one shouldn't have to set up the other.
+--
+-- Password hashes are plain Text here (see Ledger.Session for how they're
+-- made). They come back only from storeFindUser, which login needs.
+data UserStore = UserStore
+  { -- | Add a user with this password hash. False if the name is taken.
+    storeCreateUser :: User -> Text -> IO Bool
+  , storeFindUser :: Username -> IO (Maybe (User, Text))
+  , -- | Remember a session: its token hash, whose it is, when it expires.
+    storeCreateSession :: TokenHash -> Username -> UTCTime -> IO ()
+  , -- | The user a session belongs to, if it exists and hasn't expired by
+    -- the given time. Taking "now" as an argument (instead of reading the
+    -- clock inside) makes expiry easy to test.
+    storeFindSession :: TokenHash -> UTCTime -> IO (Maybe User)
+  , storeDeleteSession :: TokenHash -> IO ()
+  }
+
+-- | Users and sessions in memory, for tests and for running without Postgres.
+newInMemoryUserStore :: IO UserStore
+newInMemoryUserStore = do
+  usersVar <- newTVarIO (Map.empty :: Map Username (User, Text))
+  sessionsVar <- newTVarIO (Map.empty :: Map TokenHash (Username, UTCTime))
+  pure
+    UserStore
+      { storeCreateUser = \user hash -> atomically $ do
+          users <- readTVar usersVar
+          if Map.member (userName user) users
+            then pure False
+            else do
+              writeTVar usersVar (Map.insert (userName user) (user, hash) users)
+              pure True
+      , storeFindUser = \name -> Map.lookup name <$> readTVarIO usersVar
+      , storeCreateSession = \token name expires ->
+          atomically (modifyTVar' sessionsVar (Map.insert token (name, expires)))
+      , storeFindSession = \token now -> atomically $ do
+          sessions <- readTVar sessionsVar
+          users <- readTVar usersVar
+          -- A do block in Maybe: any Nothing (no session, or no such user)
+          -- makes the whole result Nothing.
+          pure $ do
+            (name, expires) <- Map.lookup token sessions
+            (user, _hash) <- Map.lookup name users
+            if now < expires then Just user else Nothing
+      , storeDeleteSession = atomically . modifyTVar' sessionsVar . Map.delete
       }

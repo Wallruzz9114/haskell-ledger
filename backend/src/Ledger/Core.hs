@@ -61,8 +61,8 @@ emptyLedger = Ledger Map.empty Map.empty Map.empty 1
 
 -- | Open a new account, or fail if the ID is taken.
 --
--- Read the type signature left to right: takes an id, a name, a kind and the
--- current ledger, and returns EITHER an error (Left) OR a pair of the new
+-- Read the type signature left to right: takes an id, a name, a kind, an
+-- owner (Nothing for system accounts) and the current ledger, and returns EITHER an error (Left) OR a pair of the new
 -- account and the new ledger (Right).
 --
 -- "(Account, Ledger)" is a tuple: a fixed-size group of values, like
@@ -72,13 +72,13 @@ emptyLedger = Ledger Map.empty Map.empty Map.empty 1
 -- worked on" goes last, so it's easy to chain calls or fill in the other
 -- arguments first.
 openAccount
-  :: AccountId -> Text -> AccountKind -> Ledger -> Either OpenAccountError (Account, Ledger)
-openAccount aid name kind ledger
+  :: AccountId -> Text -> AccountKind -> Maybe Username -> Ledger -> Either OpenAccountError (Account, Ledger)
+openAccount aid name kind owner ledger
   -- Guards again (see mkAmount in Ledger.Money): the first True line wins.
   | Map.member aid (ledgerAccounts ledger) = Left (AccountAlreadyExists aid)
   | otherwise =
       -- "let ... in ..." names intermediate values, then uses them.
-      let account = Account aid name kind
+      let account = Account aid name kind owner
        in Right
             ( account
             , -- Record update syntax: a COPY of ledger with three fields

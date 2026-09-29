@@ -15,9 +15,9 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Ledger.Db (newDbPool, runMigrations)
 import Ledger.Money (formatCents)
-import Ledger.Seed (demoTransfers, seedDemoData)
+import Ledger.Seed (defaultDemoPassword, demoTransfers, demoUsers, seedDemoData)
 import Ledger.Store
-import Ledger.Store.Postgres (newPostgresStore)
+import Ledger.Store.Postgres (newPostgresStore, newPostgresUserStore)
 import Ledger.Types
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
@@ -39,8 +39,11 @@ main = do
       applied <- runMigrations pool
       forM_ applied $ \name -> putStrLn ("Applied migration " <> name)
       let store = newPostgresStore pool
-      seedDemoData store
-      putStrLn ("Seeded " <> show (length demoTransfers) <> " demo transfers (already-seeded ones are skipped).")
+      -- DEMO_PASSWORD sets the demo users' password; only used for users
+      -- that don't exist yet.
+      password <- maybe defaultDemoPassword T.pack <$> lookupEnv "DEMO_PASSWORD"
+      seedDemoData password store (newPostgresUserStore pool)
+      putStrLn ("Seeded " <> show (length demoUsers) <> " demo users and " <> show (length demoTransfers) <> " demo transfers (already-seeded ones are skipped).")
       putStrLn ""
       accounts <- storeListAccounts store
       forM_ accounts $ \(account, balance) -> do

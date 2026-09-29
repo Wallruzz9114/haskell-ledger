@@ -16,7 +16,7 @@ spec = do
   describe "checkTransfer" $ do
     -- checkTransfer is the rulebook on its own: no ledger needed, just the
     -- two accounts (or Nothing) and the sender's balance.
-    let customer aid = Just (Account aid "test" Customer)
+    let customer aid = Just (Account aid "test" Customer Nothing)
     it "reports the first missing account" $
       checkTransfer (transfer alice bob 1) Nothing (customer bob) 100
         `shouldBe` Left (UnknownAccount alice)
@@ -24,7 +24,7 @@ spec = do
       checkTransfer (transfer alice bob 100) (customer alice) (customer bob) 100
         `shouldBe` Right ()
     it "lets the external account go negative" $
-      checkTransfer (transfer external bob 100) (Just (Account external "test" External)) (customer bob) 0
+      checkTransfer (transfer external bob 100) (Just (Account external "test" External Nothing)) (customer bob) 0
         `shouldBe` Right ()
 
   describe "applyTransfer" $ do
@@ -50,4 +50,4 @@ spec = do
 
   describe "openAccount" $
     it "refuses an id that's already taken" $
-      fst <$> openAccount alice "again" Customer freshLedger `shouldBe` Left (AccountAlreadyExists alice)
+      fst <$> openAccount alice "again" Customer Nothing freshLedger `shouldBe` Left (AccountAlreadyExists alice)

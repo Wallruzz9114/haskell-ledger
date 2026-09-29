@@ -7,28 +7,38 @@
 -- way to pass dependencies) and translate domain errors into HTTP responses
 -- here, and only here.
 --
--- This is the only module that knows about HTTP, JSON bodies and status
--- codes. It turns requests into domain values (TransferRequest, Amount...),
--- calls the store, and turns the results back into HTTP responses.
+-- This is the only module that knows about HTTP, JSON bodies, cookies and
+-- status codes. For each request it works out WHO is asking (the session
+-- cookie), checks they're ALLOWED (Ledger.Auth), turns the request into
+-- domain values (TransferRequest, Amount...), calls the store, and turns the
+-- result back into an HTTP response.
 module Ledger.App
   ( Env (..)
   , app
   , externalAccountId
   ) where
 
-import Control.Exception (SomeException, catch)
+import Control.Exception (SomeException, catch, evaluate)
+import Control.Monad (forM_, unless, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, asks, runReaderT)
 import Control.Monad.Trans.Class (lift)
 import Data.Aeson (FromJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
+import qualified Data.ByteString as BS
+import Data.ByteString.Builder (toLazyByteString)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 -- Qualified imports again: T.pack and TL.toStrict, so it's always clear
 -- which of the two Text types a function belongs to. Scotty 0.12 uses
 -- "lazy" Text (Data.Text.Lazy) in places; our code uses strict Text.
 import qualified Data.Text as T
+import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TLE
+import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
+import Ledger.Auth
 import Ledger.Money (Amount, Cents (..), formatCents, maxAmount, mkAmount)
+import Ledger.Session
 import Ledger.Store
 import Ledger.Types
 import Ledger.Validate
@@ -37,12 +47,18 @@ import Network.HTTP.Types.Status
 import Network.Wai (Application, Response, responseLBS)
 import Network.Wai.Middleware.RequestSizeLimit
 import System.IO (hPutStrLn, stderr)
+import Web.Cookie (SetCookie (..), defaultSetCookie, parseCookies, renderSetCookie, sameSiteLax)
 -- Scotty is a small web framework, similar to Express in Node.
 import Web.Scotty.Trans
 
--- | Everything a handler needs from outside: for now, just the store.
--- Adding a logger or config later means adding a field here.
-newtype Env = Env {envStore :: LedgerStore}
+-- | Everything a handler needs from outside.
+data Env = Env
+  { envStore :: LedgerStore
+  , envUsers :: UserStore
+  , -- | Mark the session cookie "Secure" (sent over HTTPS only). On for any
+    -- real deployment; off for http://localhost during development.
+    envSecureCookies :: Bool
+  }
 
 -- | The type of every request handler.
 --
@@ -70,14 +86,22 @@ externalAccountId = AccountId "external"
 --   o .: "x"   -> required field x
 --   o .:? "x"  -> optional field x (gives a Maybe)
 
--- | { "id": "acme-ops", "name": "Acme Operating" }
-data OpenAccountBody = OpenAccountBody Text Text
+-- | { "username": "alice", "password": "..." }
+data LoginBody = LoginBody Text Text
 
-instance FromJSON OpenAccountBody where
+instance FromJSON LoginBody where
   -- withObject checks the JSON is an object {...}, then gives us "o" to read
   -- fields from. "\o -> ..." is a lambda: (o) => ...
+  parseJSON = withObject "LoginBody" $ \o ->
+    LoginBody <$> o .: "username" <*> o .: "password"
+
+-- | { "id": "acme-ops", "name": "Acme Operating", "owner": "alice" }
+-- "owner" is optional: it defaults to whoever is logged in.
+data OpenAccountBody = OpenAccountBody Text Text (Maybe Text)
+
+instance FromJSON OpenAccountBody where
   parseJSON = withObject "OpenAccountBody" $ \o ->
-    OpenAccountBody <$> o .: "id" <*> o .: "name"
+    OpenAccountBody <$> o .: "id" <*> o .: "name" <*> o .:? "owner"
 
 -- | { "from": "acme-ops", "to": "acme-payroll", "amountCents": 1500, "memo": "..." }
 data TransferBody = TransferBody Text Text Integer (Maybe Text)
@@ -146,7 +170,51 @@ routes = do
   -- OverloadedStrings makes the literal ambiguous here.
   get "/api/health" $ json (object ["status" .= ("ok" :: Text)])
 
+  -- Logging in and out ----------------------------------------------------
+
+  post "/api/login" $ do
+    LoginBody rawName password <- decodeBody
+    users <- lift (asks envUsers)
+    found <- liftIO (storeFindUser users (Username (T.toLower (T.strip rawName))))
+    loggedIn <- liftIO $ case found of
+      Just (user, hash) -> pure (if passwordMatches password hash then Just user else Nothing)
+      Nothing -> do
+        -- No such user. Hash the password anyway and throw the result away,
+        -- so this answer takes as long as a wrong password would. Otherwise
+        -- the response time would reveal which usernames exist.
+        -- "evaluate" forces the (lazy) hash to actually be computed.
+        void (evaluate . T.length =<< hashPassword password)
+        pure Nothing
+    case loggedIn of
+      -- The same answer for "no such user" and "wrong password", for the
+      -- same reason.
+      Nothing -> failWith status401 "invalid_credentials" "Wrong username or password."
+      Just user -> do
+        (token, tokenHash) <- liftIO newSessionToken
+        now <- liftIO getCurrentTime
+        liftIO (storeCreateSession users tokenHash (userName user) (addUTCTime sessionLifetime now))
+        secure <- lift (asks envSecureCookies)
+        setHeader "Set-Cookie" (sessionCookie secure token sessionLifetime)
+        json (userJson user)
+
+  post "/api/logout" $ do
+    users <- lift (asks envUsers)
+    mToken <- sessionToken
+    -- forM_ over a Maybe runs the action only if there's a token.
+    forM_ mToken (liftIO . storeDeleteSession users . hashToken)
+    secure <- lift (asks envSecureCookies)
+    -- An empty cookie that expires immediately makes the browser drop it.
+    setHeader "Set-Cookie" (sessionCookie secure "" 0)
+    status status204
+
+  get "/api/me" $ requireUser >>= json . userJson
+
+  -- Accounts ----------------------------------------------------------------
+
   get "/api/accounts" $ do
+    -- Every route below starts by finding out who's asking. requireUser
+    -- stops the request with a 401 if nobody is logged in.
+    user <- requireUser
     -- How a handler reaches the store:
     --   asks envStore  -> read the store out of the Env
     --   lift           -> move that from the ReaderT layer up into Scotty
@@ -155,54 +223,73 @@ routes = do
     -- IO) in one function. You'll see the same three-line shape below.
     store <- lift (asks envStore)
     ledgerAccounts <- liftIO (storeListAccounts store)
-    -- List comprehension (see listAccounts in Ledger.Core) building a JSON
-    -- value for each (account, balance) pair.
-    json [accountJson a b | (a, b) <- ledgerAccounts]
+    -- A list comprehension with a filter: only the accounts this user may
+    -- see. Customers get their own; admins get everything.
+    json [accountJson a b | (a, b) <- ledgerAccounts, canView user a]
 
   post "/api/accounts" $ do
-    -- Pattern match on the parsed body to name its two fields at once.
-    OpenAccountBody rawId rawName <- decodeBody
+    user <- requireUser
+    -- Pattern match on the parsed body to name its fields at once.
+    OpenAccountBody rawId rawName rawOwner <- decodeBody
     -- Check the text before it goes anywhere near the store.
     aid <- requireValid "invalid_account_id" (validAccountId rawId)
     name <- requireValid "invalid_account_name" (validAccountName rawName)
+    -- No owner in the body means "for me".
+    let owner = maybe (userName user) (Username . T.toLower . T.strip) rawOwner
+    unless (canOpenAccountFor user owner) $
+      forbidden "You can only open accounts for yourself."
+    -- An admin opening an account for someone else: that someone must exist.
+    users <- lift (asks envUsers)
+    ownerExists <- liftIO (storeFindUser users owner)
+    case ownerExists of
+      Nothing -> failWith status404 "unknown_user" "No such user." >> finish
+      Just _ -> pure ()
     store <- lift (asks envStore)
-    result <- liftIO (storeOpenAccount store (AccountId aid) name Customer)
+    result <- liftIO (storeOpenAccount store (AccountId aid) name Customer (Just owner))
     case result of
       Left (AccountAlreadyExists _) -> failWith status409 "account_exists" "An account with that id already exists."
       -- ">>" runs one action, then the next: set status 201, then send JSON.
       Right account -> status status201 >> json (accountJson account 0)
 
   get "/api/accounts/:id" $ do
+    user <- requireUser
     -- param "id" reads the ":id" part of the URL.
-    -- "AccountId <$> param "id"" wraps the result in AccountId.
-    aid <- AccountId <$> param "id"
-    store <- lift (asks envStore)
-    found <- liftIO (storeGetAccount store aid)
-    case found of
-      Nothing -> failWith status404 "unknown_account" "No such account."
-      Just (account, bal) -> json (accountJson account bal)
+    (account, bal) <- requireVisibleAccount user =<< param "id"
+    json (accountJson account bal)
 
   get "/api/accounts/:id/entries" $ do
-    aid <- AccountId <$> param "id"
+    user <- requireUser
+    (account, _) <- requireVisibleAccount user =<< param "id"
     store <- lift (asks envStore)
-    found <- liftIO (storeEntries store aid)
+    found <- liftIO (storeEntries store (accountId account))
     -- maybe default f m: Nothing -> the 404; Just entries -> json entries.
     maybe (failWith status404 "unknown_account" "No such account.") json found
 
+  -- Moving money ------------------------------------------------------------
+
   post "/api/deposits" $ do
+    user <- requireUser
+    unless (canDeposit user) $
+      forbidden "Only admins can make deposits."
     DepositBody to cents <- decodeBody
     -- Validate the raw number into an Amount right at the edge. After this
-    -- line, "amount" is guaranteed positive (see Ledger.Money).
+    -- line, "amount" is guaranteed valid (see Ledger.Money).
     amount <- requireAmount cents
     -- A deposit is just a transfer from the external account.
-    runTransfer (TransferRequest externalAccountId (AccountId to) amount "Deposit")
+    runTransfer user (TransferRequest externalAccountId (AccountId to) amount "Deposit")
 
   post "/api/transfers" $ do
+    user <- requireUser
     TransferBody from to cents rawMemo <- decodeBody
     amount <- requireAmount cents
     -- fromMaybe "" rawMemo: use the memo if one was sent, otherwise "".
     memo <- requireValid "invalid_memo" (validMemo (fromMaybe "" rawMemo))
-    runTransfer (TransferRequest (AccountId from) (AccountId to) amount memo)
+    -- The sender must be an account this user can see (404 otherwise, so
+    -- nobody learns which accounts exist) AND send from (403).
+    (fromAccount, _) <- requireVisibleAccount user from
+    unless (canSendFrom user fromAccount) $
+      forbidden "You can only send money from your own accounts."
+    runTransfer user (TransferRequest (AccountId from) (AccountId to) amount memo)
 
   -- Any URL that matched none of the routes above: a JSON 404 like every
   -- other error, instead of Scotty's default HTML page.
@@ -210,18 +297,22 @@ routes = do
 
 -- | Shared by deposits and transfers: read the optional Idempotency-Key
 -- header, run the transfer, and send back the result.
-runTransfer :: TransferRequest -> Handler ()
-runTransfer req = do
+runTransfer :: User -> TransferRequest -> Handler ()
+runTransfer user req = do
   -- header returns "Maybe (lazy Text)": Nothing if the header is absent.
   -- "fmap f <$> action" applies f inside the Maybe inside the action's
-  -- result: convert to strict Text, then wrap in IdempotencyKey.
+  -- result: here, convert lazy Text to strict Text.
   rawKey <- fmap TL.toStrict <$> header "Idempotency-Key"
   -- traverse runs the check only when a key was sent: Nothing stays
   -- Nothing, Just k becomes Just (the checked key), or the request stops
   -- with a 400.
-  key <- traverse (fmap IdempotencyKey . requireValid "invalid_idempotency_key" . validIdempotencyKey) rawKey
+  key <- traverse (requireValid "invalid_idempotency_key" . validIdempotencyKey) rawKey
+  -- Keys are per user: "alice:payroll-1" and "bob:payroll-1" are different
+  -- keys. Otherwise one user's key could replay another user's transfer.
+  let Username name = userName user
+      scopedKey = IdempotencyKey . ((name <> ":") <>) <$> key
   store <- lift (asks envStore)
-  result <- liftIO (storeTransfer store key req)
+  result <- liftIO (storeTransfer store scopedKey req)
   case result of
     Right transfer -> status status201 >> json transfer
     Left err -> transferError err
@@ -245,6 +336,67 @@ transferError err = case err of
     failWith status409 "idempotency_key_reused" "This Idempotency-Key was already used with a different request."
 
 -- Helpers -------------------------------------------------------------------
+
+-- | Who is logged in, or reply 401 and stop.
+requireUser :: Handler User
+requireUser = do
+  mToken <- sessionToken
+  users <- lift (asks envUsers)
+  now <- liftIO getCurrentTime
+  -- "maybe (pure Nothing) f m": no cookie -> Nothing; a cookie -> look it up.
+  mUser <- maybe (pure Nothing) (\token -> liftIO (storeFindSession users (hashToken token) now)) mToken
+  maybe (failWith status401 "unauthorized" "Please log in." >> finish) pure mUser
+
+-- | The account with this id, if this user may see it. Otherwise reply 404,
+-- the same as for an account that doesn't exist, so the answer never
+-- reveals that someone else's account is there.
+requireVisibleAccount :: User -> Text -> Handler (Account, Cents)
+requireVisibleAccount user aid = do
+  store <- lift (asks envStore)
+  found <- liftIO (storeGetAccount store (AccountId aid))
+  case found of
+    Just (account, bal) | canView user account -> pure (account, bal)
+    _ -> failWith status404 "unknown_account" ("No account " <> aid <> ".") >> finish
+
+-- | Reply 403 and stop.
+forbidden :: Text -> Handler ()
+forbidden msg = failWith status403 "forbidden" msg >> finish
+
+-- | The session token from the request's Cookie header, if there is one.
+sessionToken :: Handler (Maybe Text)
+sessionToken = do
+  mCookieHeader <- header "Cookie"
+  -- A do block in Maybe: any missing piece makes the result Nothing.
+  pure $ do
+    cookieHeader <- mCookieHeader
+    value <- lookup sessionCookieName (parseCookies (encodeUtf8 (TL.toStrict cookieHeader)))
+    -- decodeUtf8' returns Left for bytes that aren't valid UTF-8, instead
+    -- of crashing; "either (const Nothing) Just" turns that into Nothing.
+    either (const Nothing) Just (decodeUtf8' value)
+
+sessionCookieName :: BS.ByteString
+sessionCookieName = "ledger_session"
+
+-- | The Set-Cookie header value for a session token.
+--
+--   HttpOnly  JavaScript can't read it, so an XSS bug can't steal it.
+--   SameSite=Lax  other websites can't make the browser send it with their
+--             POST requests (protection against cross-site request forgery).
+--   Secure    HTTPS only (see envSecureCookies).
+--   Max-Age   when the browser should forget it.
+sessionCookie :: Bool -> Text -> NominalDiffTime -> TL.Text
+sessionCookie secure token maxAge =
+  TLE.decodeUtf8 . toLazyByteString . renderSetCookie $
+    defaultSetCookie
+      { setCookieName = sessionCookieName
+      , setCookieValue = encodeUtf8 token
+      , setCookiePath = Just "/"
+      , setCookieHttpOnly = True
+      , setCookieSameSite = Just sameSiteLax
+      , setCookieSecure = secure
+      , -- realToFrac converts between the two time-length types.
+        setCookieMaxAge = Just (realToFrac maxAge)
+      }
 
 -- | Parse the request body as JSON, or reply 400 and stop.
 --
@@ -278,12 +430,22 @@ requireValid code = either (\msg -> failWith status400 code msg >> finish) pure
 failWith :: Status -> Text -> Text -> Handler ()
 failWith st code msg = status st >> json (object ["error" .= code, "message" .= msg])
 
--- | The JSON shape of an account, including its balance.
+-- | The JSON shape of an account, including its balance. "owner" is null
+-- for system accounts.
 accountJson :: Account -> Cents -> Value
 accountJson a bal =
   object
     [ "id" .= accountId a
     , "name" .= accountName a
     , "kind" .= accountKind a
+    , "owner" .= accountOwner a
     , "balanceCents" .= bal
+    ]
+
+-- | { "username": "alice", "role": "customer" }
+userJson :: User -> Value
+userJson user =
+  object
+    [ "username" .= userName user
+    , "role" .= (case userRole user of RoleCustomer -> "customer"; RoleAdmin -> "admin" :: Text)
     ]

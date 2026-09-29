@@ -19,6 +19,7 @@
 --   accounts.balance is a last line of defence if the code ever got it wrong.
 module Ledger.Store.Postgres
   ( newPostgresStore
+  , newPostgresUserStore
   ) where
 
 import Data.Aeson (Result (..), Value, fromJSON, toJSON)
@@ -27,7 +28,8 @@ import Data.Text (Text)
 import Database.PostgreSQL.Simple
 import Ledger.Core (checkTransfer)
 import Ledger.Money (Cents (..), unAmount)
-import Ledger.Store (LedgerStore (..))
+import Ledger.Session (TokenHash (..))
+import Ledger.Store (LedgerStore (..), UserStore (..))
 import Ledger.Types
 
 -- | Build a store that borrows connections from this pool.
@@ -37,26 +39,26 @@ import Ledger.Types
 newPostgresStore :: Pool Connection -> LedgerStore
 newPostgresStore pool =
   LedgerStore
-    { storeOpenAccount = \aid name kind -> withConn $ \conn -> do
+    { storeOpenAccount = \aid name kind owner -> withConn $ \conn -> do
         -- "ON CONFLICT DO NOTHING" makes a duplicate id insert zero rows
         -- instead of raising an error; execute returns the row count.
         inserted <-
           execute
             conn
-            "INSERT INTO accounts (id, name, kind) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING"
-            (accountIdText aid, name, kindText kind)
+            "INSERT INTO accounts (id, name, kind, owner) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING"
+            (accountIdText aid, name, kindText kind, usernameText <$> owner)
         pure $
           if inserted == 1
-            then Right (Account aid name kind)
+            then Right (Account aid name kind owner)
             else Left (AccountAlreadyExists aid)
     , storeGetAccount = \aid -> withConn $ \conn -> do
-        rows <- query conn "SELECT id, name, kind, balance FROM accounts WHERE id = ?" (Only (accountIdText aid))
+        rows <- query conn "SELECT id, name, kind, owner, balance FROM accounts WHERE id = ?" (Only (accountIdText aid))
         -- A list pattern: exactly one row -> found; anything else -> Nothing.
         pure $ case rows of
           [row] -> Just (accountRow row)
           _ -> Nothing
     , storeListAccounts = withConn $ \conn ->
-        map accountRow <$> query_ conn "SELECT id, name, kind, balance FROM accounts ORDER BY id"
+        map accountRow <$> query_ conn "SELECT id, name, kind, owner, balance FROM accounts ORDER BY id"
     , storeEntries = \aid -> withConn $ \conn -> do
         -- Distinguish "no such account" (Nothing) from "no entries yet"
         -- (Just []), the same as the in-memory store.
@@ -103,6 +105,49 @@ newPostgresStore pool =
     withConn :: (Connection -> IO a) -> IO a
     withConn = withResource pool
 
+-- | The Postgres implementation of 'UserStore'.
+newPostgresUserStore :: Pool Connection -> UserStore
+newPostgresUserStore pool =
+  UserStore
+    { storeCreateUser = \user hash -> withResource pool $ \conn -> do
+        inserted <-
+          execute
+            conn
+            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?) ON CONFLICT (username) DO NOTHING"
+            (usernameText (userName user), hash, roleText (userRole user))
+        pure (inserted == 1)
+    , storeFindUser = \name -> withResource pool $ \conn -> do
+        rows <- query conn "SELECT username, role, password_hash FROM users WHERE username = ?" (Only (usernameText name))
+        pure $ case rows of
+          [(u, role, hash)] -> Just (User (Username u) (roleFromText role), hash)
+          _ -> Nothing
+    , storeCreateSession = \(TokenHash token) name expires -> withResource pool $ \conn -> do
+        -- Tidy up while we're here: drop sessions that have already expired,
+        -- so the table doesn't grow forever.
+        _ <- execute conn "DELETE FROM sessions WHERE expires_at <= now()" ()
+        -- "Binary" tells postgresql-simple to send the bytes as a bytea
+        -- value rather than as text.
+        _ <-
+          execute
+            conn
+            "INSERT INTO sessions (token_hash, username, expires_at) VALUES (?, ?, ?)"
+            (Binary token, usernameText name, expires)
+        pure ()
+    , storeFindSession = \(TokenHash token) now -> withResource pool $ \conn -> do
+        rows <-
+          query
+            conn
+            "SELECT u.username, u.role FROM sessions s JOIN users u ON u.username = s.username \
+            \WHERE s.token_hash = ? AND s.expires_at > ?"
+            (Binary token, now)
+        pure $ case rows of
+          [(u, role)] -> Just (User (Username u) (roleFromText role))
+          _ -> Nothing
+    , storeDeleteSession = \(TokenHash token) -> withResource pool $ \conn -> do
+        _ <- execute conn "DELETE FROM sessions WHERE token_hash = ?" (Only (Binary token))
+        pure ()
+    }
+
 -- | Validate and apply one transfer inside an open transaction.
 transferIn :: Connection -> TransferRequest -> IO (Either TransferError Transfer)
 transferIn conn req = do
@@ -113,7 +158,7 @@ transferIn conn req = do
   rows <-
     query
       conn
-      "SELECT id, name, kind, balance FROM accounts WHERE id IN ? ORDER BY id FOR UPDATE"
+      "SELECT id, name, kind, owner, balance FROM accounts WHERE id IN ? ORDER BY id FOR UPDATE"
       (Only (In [accountIdText (reqFrom req), accountIdText (reqTo req)]))
   let accounts = map accountRow rows
       find aid = lookup aid [(accountId a, (a, bal)) | (a, bal) <- accounts]
@@ -179,8 +224,9 @@ loadTransfer conn tid = do
 -- Converting between Haskell values and database columns --------------------
 
 -- | A row from the accounts table, as (Account, balance).
-accountRow :: (Text, Text, Text, Integer) -> (Account, Cents)
-accountRow (aid, name, kind, balance) = (Account (AccountId aid) name (kindFromText kind), Cents balance)
+accountRow :: (Text, Text, Text, Maybe Text, Integer) -> (Account, Cents)
+accountRow (aid, name, kind, owner, balance) =
+  (Account (AccountId aid) name (kindFromText kind) (Username <$> owner), Cents balance)
 
 kindText :: AccountKind -> Text
 kindText Customer = "customer"
@@ -193,6 +239,18 @@ kindFromText _ = Customer
 
 accountIdText :: AccountId -> Text
 accountIdText (AccountId t) = t
+
+roleText :: Role -> Text
+roleText RoleCustomer = "customer"
+roleText RoleAdmin = "admin"
+
+roleFromText :: Text -> Role
+roleFromText "admin" = RoleAdmin
+-- The CHECK constraint guarantees the only other value is 'customer'.
+roleFromText _ = RoleCustomer
+
+usernameText :: Username -> Text
+usernameText (Username t) = t
 
 keyText :: IdempotencyKey -> Text
 keyText (IdempotencyKey t) = t
