@@ -1,0 +1,44 @@
+# Local development services. Start them with:  docker compose up -d
+#
+#   db       Postgres 16 on localhost:5434 (databases: ledger, ledger_test)
+#   adminer  a web UI for browsing the database, on http://localhost:8081
+#
+# The API and front end run on your machine (see README), pointed at the
+# database with DATABASE_URL.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    ports:
+      # 5434 on your machine -> 5432 in the container. Not 5432, so it won't
+      # clash with a Postgres already installed locally.
+      - "5434:5432"
+    volumes:
+      # Named volume: the data survives "docker compose down".
+      # "docker compose down -v" deletes it and starts fresh.
+      - pgdata:/var/lib/postgresql/data
+      # Scripts here run once, when the data volume is first created.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  adminer:
+    image: adminer:latest
+    ports:
+      - "8081:8080"
+    environment:
+      # Pre-fill the login form's server field with the db service.
+      ADMINER_DEFAULT_SERVER: db
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

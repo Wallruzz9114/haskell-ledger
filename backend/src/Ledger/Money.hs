@@ -6,6 +6,8 @@
 -- the instances of the type it wraps.
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+-- OverloadedStrings: string literals like "$" can be Text (see formatCents).
+{-# LANGUAGE OverloadedStrings #-}
 
 -- | Money is never a Double. We store integer cents and make it impossible
 -- to build a negative or zero amount by accident.
@@ -23,11 +25,15 @@ module Ledger.Money
   , Amount -- the type only, NOT its constructor (see "smart constructor" below)
   , unAmount
   , mkAmount
+  , maxAmount
+  , formatCents
   ) where
 
 -- Import only the two names we need from the aeson (JSON) library.
 -- FromJSON and ToJSON are type classes: think "interfaces" in TypeScript.
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Text (Text)
+import qualified Data.Text as T
 
 -- | A signed quantity of cents. Balances can be negative (the external
 -- funding account goes negative when money enters the system), so this type
@@ -77,5 +83,37 @@ mkAmount :: Integer -> Maybe Amount
 mkAmount n
   -- These "|" lines are guards: an if / else-if chain. The first condition
   -- that is True wins. "otherwise" is just another name for True.
-  | n > 0 = Just (Amount (Cents n))
+  | n > 0 && n <= maxAmount = Just (Amount (Cents n))
   | otherwise = Nothing
+
+-- | The largest amount one transfer may move: $1,000,000,000.00.
+--
+-- Haskell's Integer never overflows, but the database stores cents in a
+-- bigint, which tops out around 9.2 quintillion. Without a limit, one huge
+-- request would crash inside Postgres instead of getting a clear "invalid
+-- amount" answer. With it, a balance would need tens of millions of
+-- maximum-size transfers to get anywhere near the bigint limit.
+maxAmount :: Integer
+maxAmount = 100000000000
+
+-- | 125050 cents -> "$1,250.50". Integer arithmetic only, never floating point.
+-- Used for error messages (Ledger.App) and the seed command's summary.
+--
+-- "(Cents c)" in the argument unwraps the newtype right in the pattern.
+formatCents :: Cents -> Text
+formatCents (Cents c) = sign <> "$" <> commas (show whole) <> "." <> T.justifyRight 2 '0' (T.pack (show frac))
+  where
+    -- quotRem divides and gives back both the quotient and the remainder as
+    -- a pair, which we unpack straight into two names:
+    --   125050 `quotRem` 100 == (1250, 50)
+    -- Backticks turn a two-argument function into an infix operator.
+    (whole, frac) = abs c `quotRem` 100
+    sign = if c < 0 then "-" else ""
+    -- Insert thousands separators: reverse the digits, add a comma after
+    -- every third one, then reverse back. "1250" -> "0521" -> "052,1" -> "1,250"
+    commas = T.pack . reverse . go . reverse
+    -- "rest@(_ : _)" is an as-pattern: it names the whole remaining list
+    -- "rest" while also requiring it to be non-empty. That stops a comma
+    -- being added at the very front ("100" must not become ",100").
+    go (a : b : d : rest@(_ : _)) = a : b : d : ',' : go rest
+    go xs = xs

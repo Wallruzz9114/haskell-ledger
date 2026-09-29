@@ -16,10 +16,11 @@ module Ledger.App
   , externalAccountId
   ) where
 
+import Control.Exception (SomeException, catch)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, asks, runReaderT)
 import Control.Monad.Trans.Class (lift)
-import Data.Aeson (FromJSON (..), Value, eitherDecode, object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 -- Qualified imports again: T.pack and TL.toStrict, so it's always clear
@@ -27,11 +28,15 @@ import Data.Text (Text)
 -- "lazy" Text (Data.Text.Lazy) in places; our code uses strict Text.
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
-import Ledger.Money (Amount, Cents (..), mkAmount)
+import Ledger.Money (Amount, Cents (..), formatCents, maxAmount, mkAmount)
 import Ledger.Store
 import Ledger.Types
+import Ledger.Validate
+import Network.HTTP.Types.Header (hContentType)
 import Network.HTTP.Types.Status
-import Network.Wai (Application)
+import Network.Wai (Application, Response, responseLBS)
+import Network.Wai.Middleware.RequestSizeLimit
+import System.IO (hPutStrLn, stderr)
 -- Scotty is a small web framework, similar to Express in Node.
 import Web.Scotty.Trans
 
@@ -96,7 +101,41 @@ instance FromJSON DepositBody where
 -- section: a function waiting for its first argument, i.e.
 --   \action -> runReaderT action env
 app :: Env -> IO Application
-app env = scottyAppT (`runReaderT` env) routes
+-- "f . g" runs g first, then f: limit body size, then catch crashes. The
+-- outermost wrapper sees every request first and every response last.
+app env = jsonErrorsFor500 . limitBodySize <$> scottyAppT (`runReaderT` env) routes
+
+-- | Refuse request bodies over 64 KB with a JSON 413. Without a limit,
+-- Scotty reads the whole body into memory, so one huge request could use up
+-- the server's memory. No real request here is anywhere near that size.
+limitBodySize :: Application -> Application
+limitBodySize =
+  requestSizeLimitMiddleware
+    ( setOnLengthExceeded (\_limit _inner _request respond -> respond tooLarge) $
+        setMaxLengthForRequest (\_request -> pure (Just 65536)) defaultRequestSizeLimitSettings
+    )
+  where
+    tooLarge = jsonErrorResponse status413 "payload_too_large" "Request body must be at most 64 KB."
+
+-- | If a handler crashes (the database is down, a bug...), answer with the
+-- same JSON error shape as every other error instead of a plain-text 500,
+-- and log the details on the server, never in the response.
+--
+-- An Application is a function "request -> respond -> IO ResponseReceived",
+-- so wrapping one is just writing another function that calls it inside
+-- "catch", Haskell's try/catch.
+jsonErrorsFor500 :: Application -> Application
+jsonErrorsFor500 inner httpRequest respond =
+  inner httpRequest respond `catch` \e -> do
+    -- The type annotation says which exceptions to catch: all of them.
+    hPutStrLn stderr ("Unhandled error: " <> show (e :: SomeException))
+    respond (jsonErrorResponse status500 "internal_error" "Something went wrong on our side. Please try again.")
+
+-- | A complete JSON error response, for code outside Scotty's handlers.
+-- Same { "error", "message" } shape as failWith below.
+jsonErrorResponse :: Status -> Text -> Text -> Response
+jsonErrorResponse st code msg =
+  responseLBS st [(hContentType, "application/json")] (encode (object ["error" .= code, "message" .= msg]))
 
 -- | The routing table, like app.get(...) / app.post(...) in Express.
 -- Each route is a "do" block: a sequence of steps that ends in a response.
@@ -122,7 +161,10 @@ routes = do
 
   post "/api/accounts" $ do
     -- Pattern match on the parsed body to name its two fields at once.
-    OpenAccountBody aid name <- decodeBody
+    OpenAccountBody rawId rawName <- decodeBody
+    -- Check the text before it goes anywhere near the store.
+    aid <- requireValid "invalid_account_id" (validAccountId rawId)
+    name <- requireValid "invalid_account_name" (validAccountName rawName)
     store <- lift (asks envStore)
     result <- liftIO (storeOpenAccount store (AccountId aid) name Customer)
     case result of
@@ -156,10 +198,15 @@ routes = do
     runTransfer (TransferRequest externalAccountId (AccountId to) amount "Deposit")
 
   post "/api/transfers" $ do
-    TransferBody from to cents memo <- decodeBody
+    TransferBody from to cents rawMemo <- decodeBody
     amount <- requireAmount cents
-    -- fromMaybe "" memo: use the memo if one was sent, otherwise "".
-    runTransfer (TransferRequest (AccountId from) (AccountId to) amount (fromMaybe "" memo))
+    -- fromMaybe "" rawMemo: use the memo if one was sent, otherwise "".
+    memo <- requireValid "invalid_memo" (validMemo (fromMaybe "" rawMemo))
+    runTransfer (TransferRequest (AccountId from) (AccountId to) amount memo)
+
+  -- Any URL that matched none of the routes above: a JSON 404 like every
+  -- other error, instead of Scotty's default HTML page.
+  notFound $ failWith status404 "not_found" "No such endpoint."
 
 -- | Shared by deposits and transfers: read the optional Idempotency-Key
 -- header, run the transfer, and send back the result.
@@ -168,7 +215,11 @@ runTransfer req = do
   -- header returns "Maybe (lazy Text)": Nothing if the header is absent.
   -- "fmap f <$> action" applies f inside the Maybe inside the action's
   -- result: convert to strict Text, then wrap in IdempotencyKey.
-  key <- fmap (IdempotencyKey . TL.toStrict) <$> header "Idempotency-Key"
+  rawKey <- fmap TL.toStrict <$> header "Idempotency-Key"
+  -- traverse runs the check only when a key was sent: Nothing stays
+  -- Nothing, Just k becomes Just (the checked key), or the request stops
+  -- with a 400.
+  key <- traverse (fmap IdempotencyKey . requireValid "invalid_idempotency_key" . validIdempotencyKey) rawKey
   store <- lift (asks envStore)
   result <- liftIO (storeTransfer store key req)
   case result of
@@ -187,9 +238,9 @@ transferError err = case err of
   -- "<>" joins two Texts, like + on strings in TypeScript.
   UnknownAccount (AccountId aid) -> failWith status404 "unknown_account" ("No account " <> aid <> ".")
   SameAccount -> failWith status422 "same_account" "Source and destination must differ."
-  InsufficientFunds (Cents avail) (Cents req) ->
+  InsufficientFunds avail req ->
     failWith status422 "insufficient_funds" $
-      "Insufficient funds: " <> dollars avail <> " available, " <> dollars req <> " requested."
+      "Insufficient funds: " <> formatCents avail <> " available, " <> formatCents req <> " requested."
   IdempotencyKeyReused ->
     failWith status409 "idempotency_key_reused" "This Idempotency-Key was already used with a different request."
 
@@ -214,7 +265,13 @@ decodeBody = do
 requireAmount :: Integer -> Handler Amount
 requireAmount cents = case mkAmount cents of
   Just a -> pure a
-  Nothing -> failWith status400 "invalid_amount" "Amount must be a positive number of cents." >> finish
+  Nothing ->
+    failWith status400 "invalid_amount" ("Amount must be a positive number of cents, at most " <> formatCents (Cents maxAmount) <> ".")
+      >> finish
+
+-- | Use a checked value, or reply 400 with the check's message and stop.
+requireValid :: Text -> Either Text a -> Handler a
+requireValid code = either (\msg -> failWith status400 code msg >> finish) pure
 
 -- | Send an error response: { "error": "<code>", "message": "<text>" }.
 -- The front end shows "message"; code can branch on "error".
@@ -230,22 +287,3 @@ accountJson a bal =
     , "kind" .= accountKind a
     , "balanceCents" .= bal
     ]
-
--- | 125050 cents -> "$1,250.50". Integer arithmetic only, never floating point.
-dollars :: Integer -> Text
-dollars c = sign <> "$" <> commas (show whole) <> "." <> T.justifyRight 2 '0' (T.pack (show frac))
-  where
-    -- quotRem divides and gives back both the quotient and the remainder as
-    -- a pair, which we unpack straight into two names:
-    --   125050 `quotRem` 100 == (1250, 50)
-    -- Backticks turn a two-argument function into an infix operator.
-    (whole, frac) = abs c `quotRem` 100
-    sign = if c < 0 then "-" else ""
-    -- Insert thousands separators: reverse the digits, add a comma after
-    -- every third one, then reverse back. "1250" -> "0521" -> "052,1" -> "1,250"
-    commas = T.pack . reverse . go . reverse
-    -- "rest@(_ : _)" is an as-pattern: it names the whole remaining list
-    -- "rest" while also requiring it to be non-empty. That stops a comma
-    -- being added at the very front ("100" must not become ",100").
-    go (a : b : d : rest@(_ : _)) = a : b : d : ',' : go rest
-    go xs = xs
