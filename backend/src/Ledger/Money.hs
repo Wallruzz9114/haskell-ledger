@@ -25,6 +25,7 @@ module Ledger.Money
   , Amount -- the type only, NOT its constructor (see "smart constructor" below)
   , unAmount
   , mkAmount
+  , maxAmount
   , formatCents
   ) where
 
@@ -82,8 +83,18 @@ mkAmount :: Integer -> Maybe Amount
 mkAmount n
   -- These "|" lines are guards: an if / else-if chain. The first condition
   -- that is True wins. "otherwise" is just another name for True.
-  | n > 0 = Just (Amount (Cents n))
+  | n > 0 && n <= maxAmount = Just (Amount (Cents n))
   | otherwise = Nothing
+
+-- | The largest amount one transfer may move: $1,000,000,000.00.
+--
+-- Haskell's Integer never overflows, but the database stores cents in a
+-- bigint, which tops out around 9.2 quintillion. Without a limit, one huge
+-- request would crash inside Postgres instead of getting a clear "invalid
+-- amount" answer. With it, a balance would need tens of millions of
+-- maximum-size transfers to get anywhere near the bigint limit.
+maxAmount :: Integer
+maxAmount = 100000000000
 
 -- | 125050 cents -> "$1,250.50". Integer arithmetic only, never floating point.
 -- Used for error messages (Ledger.App) and the seed command's summary.

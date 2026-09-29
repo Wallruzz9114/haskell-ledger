@@ -13,13 +13,13 @@
 module Ledger.Db
   ( newDbPool
   , runMigrations
+  , migrationNames
   ) where
 
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
-import Data.FileEmbed (embedDir, makeRelativeToProject)
-import Data.List (sortOn)
-import Data.Pool (Pool, defaultPoolConfig, newPool, withResource)
+import Data.FileEmbed (embedFile, makeRelativeToProject)
+import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.Types (Query (..))
 
@@ -31,16 +31,34 @@ import Database.PostgreSQL.Simple.Types (Query (..))
 -- withResource and give it back automatically when they're done.
 newDbPool :: ByteString -> IO (Pool Connection)
 newDbPool url =
-  -- defaultPoolConfig create destroy idleSeconds maxConnections
-  newPool (defaultPoolConfig (connectPostgreSQL url) close 60 10)
+  -- defaultPoolConfig create destroy idleSeconds maxConnections.
+  -- By default the pool is split into one "stripe" per CPU core, each with
+  -- its own share of the 10 connections, and a request can only borrow from
+  -- its own stripe. On a 10-core machine that's 1 connection per stripe, so
+  -- requests would queue while other connections sit idle. One stripe keeps
+  -- all 10 connections available to everyone.
+  newPool (setNumStripes (Just 1) (defaultPoolConfig (connectPostgreSQL url) close 60 10))
 
--- | Every file in db/migrations, as (file name, contents), read at compile
--- time. "$( ... )" is a Template Haskell splice: the code inside runs while
--- compiling and its result is pasted in here as if you'd typed it.
--- makeRelativeToProject finds the folder relative to the .cabal file, so it
--- works whether you build from backend/ or the project root.
+-- | Every migration, in the order it must be applied, as (file name, SQL).
+--
+-- "$( ... )" is a Template Haskell splice: the code inside runs while
+-- compiling and its result (the file's contents) is pasted in here as if
+-- you'd typed it. makeRelativeToProject finds the file relative to the
+-- .cabal file, so it works whether you build from backend/ or the root.
+--
+-- Each file is listed by name on purpose. Embedding the whole folder would
+-- miss NEW files: GHC only knows to recompile this module when a file it
+-- already read changes, or when this module's own code changes. Adding a
+-- line here is a code change, so a new migration is always picked up.
+-- Ledger.MigrationsSpec fails if a file in db/migrations is missing here.
 migrationFiles :: [(FilePath, ByteString)]
-migrationFiles = sortOn fst $(embedDir =<< makeRelativeToProject "db/migrations")
+migrationFiles =
+  [ ("0001_create_ledger.sql", $(embedFile =<< makeRelativeToProject "db/migrations/0001_create_ledger.sql"))
+  ]
+
+-- | The names of every embedded migration, in order.
+migrationNames :: [FilePath]
+migrationNames = map fst migrationFiles
 
 -- | Apply any migrations the database hasn't seen yet, and return their
 -- names. Safe to call on every startup: already-applied files are skipped.

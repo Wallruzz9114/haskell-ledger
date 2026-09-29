@@ -21,6 +21,12 @@ spec = do
   it "accepts positive amounts" $
     unAmount <$> mkAmount 42 `shouldBe` Just (Cents 42)
 
+  it "accepts up to maxAmount and rejects anything bigger" $ do
+    unAmount <$> mkAmount maxAmount `shouldBe` Just (Cents maxAmount)
+    -- 10^20 cents: larger than a Postgres bigint can hold.
+    mkAmount (maxAmount + 1) `shouldBe` Nothing
+    mkAmount (10 ^ (20 :: Int)) `shouldBe` Nothing
+
   describe "formatCents" $ do
     it "formats dollars with thousands separators and two decimals" $ do
       formatCents 125050 `shouldBe` "$1,250.50"

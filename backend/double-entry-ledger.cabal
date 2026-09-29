@@ -6,7 +6,8 @@ synopsis:           A small double-entry ledger API in Haskell
 license:            MIT
 build-type:         Simple
 -- Files that aren't Haskell but are baked into the program at compile time
--- (see Ledger.Db). Listing them makes cabal rebuild when they change.
+-- (see Ledger.Db), so they're included when the package is bundled up.
+-- Each migration must also be added to the list in Ledger.Db.
 extra-source-files: db/migrations/*.sql
 
 -- A "common stanza" is a block of settings that other sections pull in with
@@ -40,6 +41,7 @@ library
       Ledger.Store
       Ledger.Store.Postgres
       Ledger.Types
+      Ledger.Validate
   build-depends:
       file-embed
     , http-types
@@ -51,6 +53,8 @@ library
     , scotty >=0.12 && <0.13
     , transformers
     , wai
+    -- Ready-made WAI middleware (here: the request body size limit).
+    , wai-extra
 
 -- The program you run: "cabal run ledger-api". Its main function is in
 -- app/Main.hs.
@@ -84,12 +88,15 @@ test-suite spec
   main-is:          Spec.hs
   -- Every test module must be listed, like exposed-modules for the library.
   other-modules:
+      Ledger.AppSpec
       Ledger.CoreSpec
       Ledger.InvariantsSpec
+      Ledger.MigrationsSpec
       Ledger.MoneySpec
       Ledger.SeedSpec
       Ledger.Store.PostgresSpec
       Ledger.StoreSpec
+      Ledger.ValidateSpec
       Support.Fixtures
       Support.Generators
       Support.StoreContract
@@ -102,7 +109,13 @@ test-suite spec
   build-depends:
       double-entry-ledger
     , async
+    , directory
     , hspec
+    -- Sends requests straight to the web app in tests, without a server.
+    , hspec-wai
+    , http-types
     , postgresql-simple
     , QuickCheck
     , resource-pool
+    , wai
+    , wai-extra

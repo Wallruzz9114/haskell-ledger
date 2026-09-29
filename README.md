@@ -25,6 +25,7 @@ A full-stack double-entry ledger: a Haskell API that moves money between account
 | `Ledger.Store` | Storage interface as a record of functions, with an in-memory STM implementation. |
 | `Ledger.Store.Postgres` | The same interface backed by PostgreSQL. |
 | `Ledger.Db` | Connection pool, and a migration runner for the SQL files in `backend/db/migrations`. |
+| `Ledger.Validate` | Rules for the text clients send: account ids and names, memos, idempotency keys. |
 | `Ledger.Seed` | The `external` account every ledger needs, and the demo data. |
 | `Ledger.App` | HTTP layer (Scotty). The only place domain errors become status codes. |
 
@@ -53,18 +54,21 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 26 examples, 0 failures, 1 pending
+# 51 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 32 examples, 0 failures
+# 57 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
 
 | File | What it tests |
 | --- | --- |
-| `Ledger/MoneySpec.hs` | `mkAmount` validation and `formatCents` |
+| `Ledger/AppSpec.hs` | The HTTP API: status codes, error codes, input checks, the body size limit, and a JSON 500 that doesn't leak details |
+| `Ledger/MoneySpec.hs` | `mkAmount` (including the maximum amount) and `formatCents` |
+| `Ledger/ValidateSpec.hs` | The rules for account ids and names, memos and idempotency keys |
+| `Ledger/MigrationsSpec.hs` | Every SQL file in `db/migrations` is listed in `Ledger.Db` |
 | `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, and seeding twice changes nothing |
 | `Ledger/CoreSpec.hs` | `checkTransfer`, `applyTransfer` and `openAccount` examples |
 | `Ledger/InvariantsSpec.hs` | The QuickCheck properties |
@@ -76,7 +80,7 @@ The tests are split by area under `backend/test`:
 
 [hspec-discover](https://hspec.github.io/hspec-discover.html) finds every `*Spec.hs` module automatically, so a new spec file only needs adding to `other-modules` in the cabal file.
 
-The test suite empties every table in `ledger_test` between tests, so never point `TEST_DATABASE_URL` at a database you care about.
+The Postgres tests empty every table between tests. As a safety net, they refuse to run unless the database's name ends in `_test`.
 
 ## Tech stack
 
@@ -187,6 +191,10 @@ SELECT * FROM entries ORDER BY id;                    -- two rows per transfer
 SELECT key, transfer_id, error FROM idempotency_keys; -- remembered outcomes
 ```
 
+### Changing the database schema
+
+Add a new file to `backend/db/migrations`, numbered after the last one (for example `0002_add_users.sql`), and add it to the `migrationFiles` list in [`backend/src/Ledger/Db.hs`](backend/src/Ledger/Db.hs). The API and `ledger-seed` apply it on their next start. Never edit a migration that has already been applied; add a new one instead. `MigrationsSpec` fails if a file is missing from the list.
+
 ### Coming in later steps
 
 ```sh
@@ -234,19 +242,36 @@ curl localhost:8080/api/accounts/acme-payroll/entries
 | `POST` | `/api/deposits` | Deposit from outside: `{ "to", "amountCents" }` | 201 |
 | `POST` | `/api/transfers` | Transfer: `{ "from", "to", "amountCents", "memo"? }`, optional `Idempotency-Key` header | 201 |
 
-Amounts are integer cents: `150000` is $1,500.00.
+Amounts are integer cents: `150000` is $1,500.00. One transfer can move at most $1,000,000,000.00 (`100000000000`).
+
+Input rules:
+
+| Field | Rule |
+| --- | --- |
+| Account `id` | 1 to 64 characters: lowercase letters, digits and `-` (ids appear in URLs) |
+| Account `name` | 1 to 100 characters |
+| `memo` | Optional, at most 500 characters |
+| `Idempotency-Key` header | 1 to 255 visible ASCII characters, no spaces. A UUID works well. |
+| Request body | At most 64 KB |
 
 Errors come back as `{ "error": "<code>", "message": "<text>" }`:
 
 | Status | `error` | When |
 | --- | --- | --- |
 | 400 | `bad_request` | The body isn't valid JSON or is missing a field |
-| 400 | `invalid_amount` | `amountCents` is zero or negative |
+| 400 | `invalid_amount` | `amountCents` is zero, negative, or over the maximum |
+| 400 | `invalid_account_id` | The account id breaks the rules above |
+| 400 | `invalid_account_name` | The account name is empty or too long |
+| 400 | `invalid_memo` | The memo is too long |
+| 400 | `invalid_idempotency_key` | The `Idempotency-Key` header is empty, too long, or has spaces |
 | 404 | `unknown_account` | An account in the request doesn't exist |
+| 404 | `not_found` | No endpoint at that URL |
 | 409 | `account_exists` | Opening an account with an id that's taken |
 | 409 | `idempotency_key_reused` | The same `Idempotency-Key` was sent with a different request |
+| 413 | `payload_too_large` | The request body is over 64 KB |
 | 422 | `same_account` | `from` and `to` are the same account |
 | 422 | `insufficient_funds` | The transfer would take a customer account below zero |
+| 500 | `internal_error` | Something failed on the server (for example, the database is down). Details are logged on the server, never sent to the client. |
 
 ## Progress
 
