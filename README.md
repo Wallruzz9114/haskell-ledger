@@ -94,6 +94,7 @@ Requires:
 - Docker, for Postgres
 - `libpq`, Postgres's C client library, which the Haskell driver links against. On macOS: `brew install libpq` (or any Homebrew `postgresql@XX`).
 - Node 22, for the front end (later step)
+- Optional, for editor support in `backend/test/Spec.hs`: `cabal install hspec-discover`. The Haskell language server needs the `hspec-discover` program on your `PATH`. `cabal build` and `cabal test` don't, because cabal builds it for them.
 
 ### 1. Start Postgres
 
