@@ -25,9 +25,10 @@ A full-stack double-entry ledger: a Haskell API that moves money between account
 | `Ledger.Store` | Storage interface as a record of functions, with an in-memory STM implementation. |
 | `Ledger.Store.Postgres` | The same interface backed by PostgreSQL. |
 | `Ledger.Db` | Connection pool, and a migration runner for the SQL files in `backend/db/migrations`. |
+| `Ledger.Seed` | The `external` account every ledger needs, and the demo data. |
 | `Ledger.App` | HTTP layer (Scotty). The only place domain errors become status codes. |
 
-The API uses Postgres when `DATABASE_URL` is set, and the in-memory store otherwise. Nothing outside `app/Main.hs` knows which one it's using.
+The API uses Postgres when `DATABASE_URL` is set, and the in-memory store otherwise. Only the two programs' `Main` modules choose a store; nothing else knows which one it's using.
 
 ## Tests
 
@@ -52,18 +53,19 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 21 examples, 0 failures, 1 pending
+# 26 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 27 examples, 0 failures
+# 32 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
 
 | File | What it tests |
 | --- | --- |
-| `Ledger/MoneySpec.hs` | `mkAmount` validation |
+| `Ledger/MoneySpec.hs` | `mkAmount` validation and `formatCents` |
+| `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, and seeding twice changes nothing |
 | `Ledger/CoreSpec.hs` | `checkTransfer`, `applyTransfer` and `openAccount` examples |
 | `Ledger/InvariantsSpec.hs` | The QuickCheck properties |
 | `Ledger/StoreSpec.hs` | The store contract against the in-memory store |
@@ -111,31 +113,56 @@ This starts two services:
 
 The data lives in a Docker volume, so it survives `docker compose down`. To start from scratch, run `docker compose down -v`.
 
-### 2. Run the API
+### 2. Add demo data
 
 ```sh
 cd backend
 cabal build all   # the first build compiles dependencies and takes a while
 
-DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger cabal run ledger-api
-# Applied migration 0001_create_ledger.sql
-# Using the Postgres store
+export DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger
+cabal run ledger-seed
+```
+
+`ledger-seed` applies any new migrations, adds the demo data, and prints every balance. Running it again changes nothing: each seed transfer carries an idempotency key, so a second run replays the remembered result instead of moving the money again.
+
+The demo data is three months (July to September 2026) of activity for two companies: 37 transfers in all.
+
+- **Money coming in:** client payments into `acme-ops` and `globex-ops`.
+- **Regular costs:** monthly payroll funding and payroll runs, rent and software subscriptions.
+- **Moving money around:** a 15% tax set-aside into `acme-tax`, savings transfers, Acme paying Globex's invoices, and a Q3 estimated tax payment in September.
+
+| Account | Balance after seeding |
+| --- | --- |
+| `acme-ops` | $28,253.00 |
+| `acme-payroll` | $1,500.00 |
+| `acme-savings` | $6,000.00 |
+| `acme-tax` | $4,160.00 |
+| `external` | -$75,013.00 |
+| `globex-ops` | $34,500.00 |
+| `globex-payroll` | $600.00 |
+
+`external` is negative because it's where money enters and leaves the ledger. All balances always sum to zero. The data is defined in [`backend/src/Ledger/Seed.hs`](backend/src/Ledger/Seed.hs).
+
+To wipe everything and start again:
+
+```sh
+docker compose down -v && docker compose up -d
+cabal run ledger-seed
+```
+
+### 3. Run the API
+
+```sh
+cabal run ledger-api   # with DATABASE_URL still set
+# Using the Postgres store (add demo data with: cabal run ledger-seed)
 # Ledger API listening on http://localhost:8080
 ```
 
-On startup the API applies any new migrations, then seeds demo data. Seeding is safe to repeat: each seed transfer carries an idempotency key, so restarting never moves the money twice.
+On startup the API applies any new migrations and makes sure the `external` account exists. It never adds demo data to a database by itself, so pointing it at a real database can't create fake money.
 
-| Account | Kind | Balance after seeding |
-| --- | --- | --- |
-| `external` | External | -$25,000.00 |
-| `acme-ops` | Customer | $21,000.00 |
-| `acme-payroll` | Customer | $4,000.00 |
+Without `DATABASE_URL`, `cabal run ledger-api` uses the in-memory store and fills it with the same demo data. That needs no Docker, but the data is lost on restart. Set `PORT` to use a port other than 8080.
 
-That's a $25,000 deposit into `acme-ops`, then $4,000 of August payroll to `acme-payroll`. The external balance is negative because the deposit came from outside the ledger, and all balances always sum to zero.
-
-Without `DATABASE_URL`, `cabal run ledger-api` uses the in-memory store instead. That needs no Docker, but the data is lost on restart. Set `PORT` to use a port other than 8080.
-
-### 3. Look at the data
+### 4. Look at the data
 
 **Adminer:** open <http://localhost:8081> and log in with:
 
@@ -242,7 +269,8 @@ haskell-ledger/
   docker/postgres-init/      # creates the ledger_test database on first start
   backend/
     double-entry-ledger.cabal
-    app/Main.hs              # entry point: picks a store, seeds data, starts the server
+    app/Main.hs              # the API server: picks a store, starts the server
+    seed/Main.hs             # the ledger-seed command: adds demo data to DATABASE_URL
     src/Ledger/*.hs          # the library (see Design)
     db/migrations/*.sql      # schema changes, applied in order at startup
     test/                    # one *Spec.hs per area, plus shared Support/ modules

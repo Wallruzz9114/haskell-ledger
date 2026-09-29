@@ -27,7 +27,7 @@ import Data.Text (Text)
 -- "lazy" Text (Data.Text.Lazy) in places; our code uses strict Text.
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
-import Ledger.Money (Amount, Cents (..), mkAmount)
+import Ledger.Money (Amount, Cents, formatCents, mkAmount)
 import Ledger.Store
 import Ledger.Types
 import Network.HTTP.Types.Status
@@ -187,9 +187,9 @@ transferError err = case err of
   -- "<>" joins two Texts, like + on strings in TypeScript.
   UnknownAccount (AccountId aid) -> failWith status404 "unknown_account" ("No account " <> aid <> ".")
   SameAccount -> failWith status422 "same_account" "Source and destination must differ."
-  InsufficientFunds (Cents avail) (Cents req) ->
+  InsufficientFunds avail req ->
     failWith status422 "insufficient_funds" $
-      "Insufficient funds: " <> dollars avail <> " available, " <> dollars req <> " requested."
+      "Insufficient funds: " <> formatCents avail <> " available, " <> formatCents req <> " requested."
   IdempotencyKeyReused ->
     failWith status409 "idempotency_key_reused" "This Idempotency-Key was already used with a different request."
 
@@ -230,22 +230,3 @@ accountJson a bal =
     , "kind" .= accountKind a
     , "balanceCents" .= bal
     ]
-
--- | 125050 cents -> "$1,250.50". Integer arithmetic only, never floating point.
-dollars :: Integer -> Text
-dollars c = sign <> "$" <> commas (show whole) <> "." <> T.justifyRight 2 '0' (T.pack (show frac))
-  where
-    -- quotRem divides and gives back both the quotient and the remainder as
-    -- a pair, which we unpack straight into two names:
-    --   125050 `quotRem` 100 == (1250, 50)
-    -- Backticks turn a two-argument function into an infix operator.
-    (whole, frac) = abs c `quotRem` 100
-    sign = if c < 0 then "-" else ""
-    -- Insert thousands separators: reverse the digits, add a comma after
-    -- every third one, then reverse back. "1250" -> "0521" -> "052,1" -> "1,250"
-    commas = T.pack . reverse . go . reverse
-    -- "rest@(_ : _)" is an as-pattern: it names the whole remaining list
-    -- "rest" while also requiring it to be non-empty. That stops a comma
-    -- being added at the very front ("100" must not become ",100").
-    go (a : b : d : rest@(_ : _)) = a : b : d : ',' : go rest
-    go xs = xs
