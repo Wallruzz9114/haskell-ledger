@@ -37,12 +37,13 @@ The rules live in pure functions, so the test suite checks them with QuickCheck 
 - no customer account ever goes negative
 - every balance equals the sum of that account's entries
 
-Example tests (hspec) cover amount validation and each rejection case. The store tests run against **both** stores, the in-memory one and Postgres:
+Example tests (hspec) cover amount validation, each transfer rule and each rejection case. The store tests are written once, as a contract every `LedgerStore` must meet, and run against **both** stores, the in-memory one and Postgres:
 
 - an idempotent request sent twice moves money once
 - a reused key with a different request is rejected
 - a failed request is remembered: a retry gets the same error even after the balance changes
 - unknown and duplicate accounts are reported
+- accounts are listed in id order with their balances
 - 200 concurrent 10-cent transfers from a 1,000-cent account: exactly 100 succeed and the balance ends at zero
 - 200 concurrent transfers in opposite directions between two accounts all succeed, with no deadlocks
 
@@ -51,12 +52,27 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 16 examples, 0 failures, 1 pending
+# 21 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 21 examples, 0 failures
+# 27 examples, 0 failures
 ```
+
+The tests are split by area under `backend/test`:
+
+| File | What it tests |
+| --- | --- |
+| `Ledger/MoneySpec.hs` | `mkAmount` validation |
+| `Ledger/CoreSpec.hs` | `checkTransfer`, `applyTransfer` and `openAccount` examples |
+| `Ledger/InvariantsSpec.hs` | The QuickCheck properties |
+| `Ledger/StoreSpec.hs` | The store contract against the in-memory store |
+| `Ledger/Store/PostgresSpec.hs` | The store contract against Postgres |
+| `Support/Fixtures.hs` | Shared account ids and shorthands |
+| `Support/Generators.hs` | Random transfer sequences for QuickCheck |
+| `Support/StoreContract.hs` | The tests every `LedgerStore` must pass |
+
+[hspec-discover](https://hspec.github.io/hspec-discover.html) finds every `*Spec.hs` module automatically, so a new spec file only needs adding to `other-modules` in the cabal file.
 
 The test suite empties every table in `ledger_test` between tests, so never point `TEST_DATABASE_URL` at a database you care about.
 
@@ -228,7 +244,7 @@ haskell-ledger/
     app/Main.hs              # entry point: picks a store, seeds data, starts the server
     src/Ledger/*.hs          # the library (see Design)
     db/migrations/*.sql      # schema changes, applied in order at startup
-    test/Spec.hs             # hspec examples and QuickCheck properties
+    test/                    # one *Spec.hs per area, plus shared Support/ modules
     api.http                 # sample requests for the REST Client extension
   web/                       # Vite + React + TypeScript (later step)
   .github/workflows/ci.yml   # CI (later step)

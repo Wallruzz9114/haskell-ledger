@@ -24,7 +24,7 @@ import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.Types (Query (..))
 
 -- | Open a pool of up to 10 connections to the database at this URL, e.g.
--- "postgresql://ledger:ledger@localhost:5434/ledger".
+-- "postgresql://USER:PASSWORD@HOST:PORT/DATABASE".
 --
 -- A pool keeps connections open and lends them out, because opening a new
 -- connection for every request is slow. Requests borrow one with
