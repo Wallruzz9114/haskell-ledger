@@ -2,7 +2,7 @@
 
 A full-stack double-entry ledger: a Haskell API that moves money between accounts and enforces bookkeeping rules, with property-based tests and a React + TypeScript + Redux Toolkit front end.
 
-> **Status: work in progress.** The API runs today. The test suite, front end and CI are still to come; see [Progress](#progress).
+> **Status: work in progress.** The API and its test suite work today. The front end and CI are still to come; see [Progress](#progress).
 >
 > Built step by step while learning Haskell, so every source file carries beginner-level comments explaining the Haskell it uses.
 
@@ -24,11 +24,25 @@ A full-stack double-entry ledger: a Haskell API that moves money between account
 | `Ledger.Store` | Storage interface as a record of functions, with an in-memory STM implementation. |
 | `Ledger.App` | HTTP layer (Scotty). The only place domain errors become status codes. |
 
-The rules live in pure functions, so the test suite checks them with QuickCheck over hundreds of random transfer sequences:
+## Tests
+
+The rules live in pure functions, so the test suite checks them with QuickCheck over hundreds of random sequences of deposits and transfers (100 per property, checked after every step):
 
 - the sum of all balances is always zero
 - no customer account ever goes negative
 - every balance equals the sum of that account's entries
+
+Example tests (hspec) cover amount validation, each rejection case, and the in-memory store:
+
+- an idempotent request sent twice moves money once
+- a reused key with a different request is rejected
+- 200 concurrent 10-cent transfers from a 1,000-cent account: exactly 100 succeed and the balance ends at zero
+
+```sh
+cd backend
+cabal test --test-show-details=direct
+# 12 examples, 0 failures
+```
 
 ## Tech stack
 
@@ -48,6 +62,9 @@ Requires GHC 9.4.8 and cabal (install both with [GHCup](https://www.haskell.org/
 cd backend
 cabal build all
 
+# Run the tests
+cabal test --test-show-details=direct
+
 # Run the API on http://localhost:8080 (set PORT to use another port)
 cabal run ledger-api
 ```
@@ -65,9 +82,6 @@ The external balance is negative because the seed deposit came from outside the 
 Coming in later steps:
 
 ```sh
-# Tests (Step 7)
-cabal test --test-show-details=direct
-
 # Front end on http://localhost:5173, in a second terminal (Steps 8-9)
 cd web
 npm install
@@ -78,7 +92,7 @@ In development, Vite will proxy `/api` requests to the Haskell server, so no COR
 
 ## Try it
 
-With the API running:
+With the API running, use `curl` as below, or open [`backend/api.http`](backend/api.http) in VS Code with the [REST Client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client) extension and click **Send Request** above each block.
 
 ```sh
 # List accounts and balances
@@ -131,7 +145,7 @@ Errors come back as `{ "error": "<code>", "message": "<text>" }`:
 - [x] Domain types (`Ledger.Money`, `Ledger.Types`)
 - [x] Pure core and STM store
 - [x] HTTP layer and executable
-- [ ] Tests
+- [x] Tests
 - [ ] Front end
 - [ ] CI
 
@@ -144,7 +158,8 @@ haskell-ledger/
     double-entry-ledger.cabal
     app/Main.hs              # entry point: seeds data, starts the server
     src/Ledger/*.hs          # the library (see Design)
-    test/Spec.hs             # Step 7
+    test/Spec.hs             # hspec examples and QuickCheck properties
+    api.http                 # sample requests for the REST Client extension
   web/                       # Vite + React + TypeScript (Steps 8-9)
   .github/workflows/ci.yml   # CI (later step)
 ```

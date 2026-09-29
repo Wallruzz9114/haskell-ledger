@@ -1,0 +1,44 @@
+### Requests for the REST Client extension (humao.rest-client).
+### Start the API first (cabal run ledger-api), then click "Send Request"
+### above any block.
+
+### Health check
+GET http://localhost:8080/api/health
+
+### List accounts
+GET http://localhost:8080/api/accounts
+
+### Transfer with an idempotency key (send it twice: same result, money moves once)
+POST http://localhost:8080/api/transfers
+Content-Type: application/json
+Idempotency-Key: payroll-1
+
+{ "from": "acme-ops", "to": "acme-payroll", "amountCents": 150000, "memo": "September payroll" }
+
+### Same key, different request (expect 409 idempotency_key_reused)
+POST http://localhost:8080/api/transfers
+Content-Type: application/json
+Idempotency-Key: payroll-1
+
+{ "from": "acme-ops", "to": "acme-payroll", "amountCents": 1 }
+
+### Overdraft (expect 422 insufficient_funds)
+POST http://localhost:8080/api/transfers
+Content-Type: application/json
+
+{ "from": "acme-payroll", "to": "acme-ops", "amountCents": 99999999 }
+
+### Deposit from outside the ledger
+POST http://localhost:8080/api/deposits
+Content-Type: application/json
+
+{ "to": "acme-payroll", "amountCents": 50000 }
+
+### Open a new account
+POST http://localhost:8080/api/accounts
+Content-Type: application/json
+
+{ "id": "acme-savings", "name": "Acme Savings" }
+
+### Entries for payroll
+GET http://localhost:8080/api/accounts/acme-payroll/entries
