@@ -44,6 +44,21 @@ describe('App', () => {
     expect(login?.headers.get('Content-Type')).toBe('application/json')
   })
 
+  it('offers a retry when the API is down, instead of a dead end', async () => {
+    let apiUp = false
+    fakeApi({
+      // A proxy in front of a stopped API answers 502 with no JSON body.
+      'GET /api/me': () =>
+        apiUp ? { status: 401, body: apiError('unauthorized', 'Please log in.') } : { status: 502 },
+    })
+    renderWithStore(<App />)
+    expect(await screen.findByText(/Couldn't reach the server/)).toBeInTheDocument()
+
+    apiUp = true
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument()
+  })
+
   it('goes back to the login page after logging out', async () => {
     let loggedIn = true
     fakeApi({

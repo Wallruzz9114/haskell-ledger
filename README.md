@@ -104,9 +104,9 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 | `src/app/money.test.ts` | Formatting cents and parsing typed amounts, with no floating-point rounding and the API's maximum |
 | `src/app/api.test.ts` | Reading error messages and 401s from API responses |
 | `src/app/idempotency.test.ts` | Idempotency keys: valid UUIDs, never repeated, and made without `crypto.randomUUID` so plain-HTTP pages work |
-| `src/App.test.tsx` | Logged out shows the login page, logging in shows your accounts, logging out goes back |
+| `src/App.test.tsx` | Logged out shows the login page, logging in shows your accounts, logging out goes back, and an unreachable API offers a retry that works |
 | `src/features/auth/LoginPage.test.tsx` | Wrong-password and lockout messages |
-| `src/features/accounts/AccountsPanel.test.tsx` | Customers vs admins: what each sees |
+| `src/features/accounts/AccountsPanel.test.tsx` | Customers vs admins: what each sees, and balances refreshing when the tab gets focus again |
 | `src/features/accounts/AccountEntries.test.tsx` | Each entry's counterparty ("To"/"From"), memo, date and signed amount |
 | `src/features/transfers/TransferForm.test.tsx` | Only your own accounts to send from; amounts sent in cents; the same `Idempotency-Key` on an unchanged retry but a new one once the details change (so editing a refused transfer isn't a 409); API errors shown |
 | `src/features/transfers/DepositForm.test.tsx` | Deposits: customer accounts only, and the same key rules as transfers |
@@ -120,6 +120,8 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 | Backend | Build with GHC 9.4.8 and `-Wall`, hlint (no hints allowed), and the whole test suite, including the Postgres tests against a Postgres 16 service container |
 | Frontend | `npm ci`, typecheck, oxlint, Prettier, Vitest, and a production build |
 | Docker images | Builds the API and web images, so a broken Dockerfile shows up on the PR (layers are cached between runs) |
+
+`main` is protected: GitHub won't merge a pull request into it until all three jobs pass.
 
 Compiled Haskell dependencies are cached between runs, so only the first run (or one after changing the cabal file) compiles them all.
 
@@ -298,7 +300,7 @@ Open <http://localhost:5173> and log in as one of the demo users:
 - **alice** or **bob** see only their own accounts, can send money from them to any account id (for example alice paying `globex-ops`), and can open new accounts for themselves.
 - **admin** sees every account with its owner, makes deposits, opens accounts for users, and assigns owners. Admins can't send money out of customers' accounts, so there's no transfer form.
 
-Click an account to see its double-entry history: when each transfer happened, who was on the other side, the memo, and the amount. Vite forwards `/api` requests to the Haskell server, so the browser only ever talks to one origin: the session cookie just works, and there's no CORS to set up.
+Click an account to see its double-entry history: when each transfer happened, who was on the other side, the memo, and the amount. Balances refresh by themselves when you come back to the tab or your connection returns, so a payment made elsewhere shows up without reloading. If the API can't be reached, the page says so and offers **Try again**. Vite forwards `/api` requests to the Haskell server, so the browser only ever talks to one origin: the session cookie just works, and there's no CORS to set up.
 
 Front-end commands, from `web/`:
 

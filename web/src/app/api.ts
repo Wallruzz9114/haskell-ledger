@@ -92,6 +92,12 @@ export const ledgerApi = createApi({
   reducerPath: 'ledgerApi',
   baseQuery,
   tagTypes: ['Me', 'Account'],
+  // Balances can change while you're looking elsewhere (someone pays you,
+  // or you move money in another tab). Refetch whatever is on screen when
+  // the tab gets focus again or the network comes back, so the page never
+  // shows a stale balance for long. Needs setupListeners (see main.tsx).
+  refetchOnFocus: true,
+  refetchOnReconnect: true,
   endpoints: (build) => ({
     me: build.query<User, void>({
       query: () => 'me',
@@ -176,5 +182,5 @@ export function errorMessage(err: unknown): string | null {
       return (data as ApiError).message
     }
   }
-  return 'Something went wrong. Is the API running on port 8080?'
+  return "Couldn't reach the server. Check that the API is running, then try again."
 }
