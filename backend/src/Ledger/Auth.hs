@@ -8,6 +8,8 @@ module Ledger.Auth
   , canSendFrom
   , canDeposit
   , canOpenAccountFor
+  , canSeeAllAccounts
+  , canAssignOwners
   ) where
 
 import Ledger.Types
@@ -30,6 +32,14 @@ canDeposit = isAdmin
 -- | Customers can open accounts for themselves; admins for anyone.
 canOpenAccountFor :: User -> Username -> Bool
 canOpenAccountFor user owner = isAdmin user || userName user == owner
+
+-- | Admins see every account, including system accounts.
+canSeeAllAccounts :: User -> Bool
+canSeeAllAccounts = isAdmin
+
+-- | Only admins can give an account an owner (or move it to another user).
+canAssignOwners :: User -> Bool
+canAssignOwners = isAdmin
 
 -- Helpers ------------------------------------------------------------------
 

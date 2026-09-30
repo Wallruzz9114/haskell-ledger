@@ -43,6 +43,7 @@ library
       Ledger.Session
       Ledger.Store
       Ledger.Store.Postgres
+      Ledger.Throttle
       Ledger.Types
       Ledger.Validate
   build-depends:
@@ -52,6 +53,8 @@ library
     , crypton
     , file-embed
     , http-types
+    -- Network addresses, for counting failed logins per client.
+    , network
     , ram
     -- The Postgres driver (needs libpq, Postgres's C client library) and a
     -- connection pool.
@@ -70,9 +73,11 @@ executable ledger-api
   import:           shared
   hs-source-dirs:   app
   main-is:          Main.hs
-  -- -threaded uses the multi-core runtime, so the web server can handle
-  -- requests in parallel.
-  ghc-options:      -threaded -rtsopts
+  -- -threaded uses the multi-core runtime, and -N runs it on every CPU
+  -- core, so the web server handles requests in parallel. Without -N it
+  -- runs on one core, and each ~50 ms password check would pause every
+  -- other request.
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       double-entry-ledger
     , warp
@@ -106,6 +111,7 @@ test-suite spec
       Ledger.SessionSpec
       Ledger.Store.PostgresSpec
       Ledger.StoreSpec
+      Ledger.ThrottleSpec
       Ledger.UserStoreSpec
       Ledger.ValidateSpec
       Support.Fixtures

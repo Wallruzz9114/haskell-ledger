@@ -18,7 +18,7 @@ import Control.Concurrent.STM
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import Data.Time (UTCTime)
+import Data.Time (UTCTime, getCurrentTime)
 import Ledger.Core
 import Ledger.Money (Cents)
 import Ledger.Session (TokenHash)
@@ -45,6 +45,12 @@ data LedgerStore = LedgerStore
   { storeOpenAccount :: AccountId -> Text -> AccountKind -> Maybe Username -> IO (Either OpenAccountError Account)
   , storeGetAccount :: AccountId -> IO (Maybe (Account, Cents))
   , storeListAccounts :: IO [(Account, Cents)]
+  , -- | Only the accounts this user owns. Customers see just these, so the
+    -- database does the filtering instead of sending every account over.
+    storeListAccountsOwnedBy :: Username -> IO [(Account, Cents)]
+  , -- | Set a customer account's owner. False if there's no such customer
+    -- account (system accounts can't be owned).
+    storeSetAccountOwner :: AccountId -> Username -> IO Bool
   , storeEntries :: AccountId -> IO (Maybe [Entry])
   , -- "Maybe IdempotencyKey": the key is optional, the client may not send one.
     storeTransfer :: Maybe IdempotencyKey -> TransferRequest -> IO (Either TransferError Transfer)
@@ -104,6 +110,13 @@ newInMemoryStore = do
       , -- "<$>" is fmap: apply a function to the result of an action, like
         -- promise.then(listAccounts). Reads the ledger, then lists accounts.
         storeListAccounts = listAccounts <$> readTVarIO ledgerVar
+      , storeListAccountsOwnedBy = \owner ->
+          filter ((== Just owner) . accountOwner . fst) . listAccounts <$> readTVarIO ledgerVar
+      , storeSetAccountOwner = \aid owner -> atomically $ do
+          ledger <- readTVar ledgerVar
+          case setAccountOwner aid owner ledger of
+            Just ledger' -> writeTVar ledgerVar ledger' >> pure True
+            Nothing -> pure False
       , storeEntries = \aid -> entriesFor aid <$> readTVarIO ledgerVar
       , storeTransfer = \mkey req -> atomically $ do
           -- Everything in this block is one transaction: the idempotency
@@ -178,8 +191,13 @@ newInMemoryUserStore = do
               writeTVar usersVar (Map.insert (userName user) (user, hash) users)
               pure True
       , storeFindUser = \name -> Map.lookup name <$> readTVarIO usersVar
-      , storeCreateSession = \token name expires ->
-          atomically (modifyTVar' sessionsVar (Map.insert token (name, expires)))
+      , storeCreateSession = \token name expires -> do
+          now <- getCurrentTime
+          -- Drop sessions that have already expired while adding this one,
+          -- so the map doesn't grow forever (the Postgres store does the
+          -- same with a DELETE).
+          atomically . modifyTVar' sessionsVar $
+            Map.insert token (name, expires) . Map.filter ((> now) . snd)
       , storeFindSession = \token now -> atomically $ do
           sessions <- readTVar sessionsVar
           users <- readTVar usersVar

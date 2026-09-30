@@ -18,13 +18,14 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import Ledger.App (Env (..), app)
+import Data.Text.Encoding (encodeUtf8)
+import Ledger.App (CookiePolicy (..), app, newEnv)
 import Ledger.Seed (seedDemoData)
 import Ledger.Session (hashPassword)
 import Ledger.Store
 import Ledger.Types
-import Network.HTTP.Types (Header, methodGet, methodPost)
-import Network.Wai (Application, RequestBodyLength (..), defaultRequest, requestBodyLength, requestMethod)
+import Network.HTTP.Types (Header, methodGet, methodPost, methodPut)
+import Network.Wai (Application, RequestBodyLength (..), defaultRequest, requestBodyLength, requestHeaders, requestMethod)
 import qualified Network.Wai.Test as WaiTest
 import Test.Hspec
 import Test.Hspec.Wai
@@ -159,6 +160,69 @@ spec = do
       cookie <- loginAs "alice"
       keyedTransfer cookie "two words" (transfer "acme-ops" "acme-payroll" 1) `shouldRespondWith` errorCode 400 "invalid_idempotency_key"
 
+  describe "login limits" $ with demoApp $ do
+    it "refuses a username after 5 wrong passwords, even with the right one" $ do
+      mapM_ (const (login "alice" "wrong-password")) [1 .. 5 :: Int]
+      response <- login "alice" "test-password"
+      liftIO $ lookup "Retry-After" (simpleHeaders response) `shouldSatisfy` (/= Nothing)
+      pure response `shouldRespondWith` errorCode 429 "too_many_attempts"
+
+    it "doesn't lock out other users" $ do
+      mapM_ (const (login "alice" "wrong-password")) [1 .. 5 :: Int]
+      login "bob" "test-password" `shouldRespondWith` 200
+
+  describe "login limits behind a trusted proxy" $ with (demoAppWith True) $
+    it "counts failures per client address from X-Forwarded-For" $ do
+      -- 30 failures from one client (the last address is what our proxy saw).
+      mapM_ (\i -> loginFrom "203.0.113.1" ("user" <> T.pack (show i)) "wrong") [1 .. 30 :: Int]
+      loginFrom "203.0.113.1" "alice" "test-password" `shouldRespondWith` errorCode 429 "too_many_attempts"
+      -- A different client behind the same proxy is unaffected.
+      loginFrom "203.0.113.2" "alice" "test-password" `shouldRespondWith` 200
+
+  describe "login limits without a trusted proxy" $ with demoApp $
+    it "ignores X-Forwarded-For, so a faked header can't dodge the limit" $ do
+      mapM_ (\i -> loginFrom (T.pack ("198.51.100." <> show i)) ("user" <> T.pack (show i)) "wrong") [1 .. 30 :: Int]
+      loginFrom "198.51.100.200" "alice" "test-password" `shouldRespondWith` errorCode 429 "too_many_attempts"
+
+  describe "account owners" $ with demoApp $ do
+    it "lets an admin give an account a new owner, who can then see it" $ do
+      admin <- loginAs "admin"
+      putAs admin "/api/accounts/globex-ops/owner" "{\"owner\": \"alice\"}" `shouldRespondWith` 200
+      alice <- loginAs "alice"
+      getAs alice "/api/accounts/globex-ops" `shouldRespondWith` 200
+
+    it "is for admins only" $ do
+      alice <- loginAs "alice"
+      putAs alice "/api/accounts/globex-ops/owner" "{\"owner\": \"alice\"}" `shouldRespondWith` errorCode 403 "forbidden"
+
+    it "never gives the external account an owner" $ do
+      admin <- loginAs "admin"
+      putAs admin "/api/accounts/external/owner" "{\"owner\": \"alice\"}" `shouldRespondWith` errorCode 422 "system_account"
+
+    it "needs an existing account and an existing user" $ do
+      admin <- loginAs "admin"
+      putAs admin "/api/accounts/nobody/owner" "{\"owner\": \"alice\"}" `shouldRespondWith` errorCode 404 "unknown_account"
+      putAs admin "/api/accounts/acme-ops/owner" "{\"owner\": \"nobody\"}" `shouldRespondWith` errorCode 404 "unknown_user"
+
+  describe "browser safety" $ with demoApp $ do
+    it "refuses request bodies that aren't sent as JSON" $ do
+      cookie <- loginAs "alice"
+      -- What a form on another website would send: no application/json.
+      request methodPost "/api/transfers" [("Content-Type", "text/plain"), ("Cookie", cookie)] (transfer "acme-ops" "acme-payroll" 1)
+        `shouldRespondWith` errorCode 415 "unsupported_media_type"
+
+    it "tells browsers and proxies not to store responses" $ do
+      response <- get "/api/health"
+      liftIO $ lookup "Cache-Control" (simpleHeaders response) `shouldBe` Just "no-store"
+
+    it "marks the cookie Secure when the request came over HTTPS, and not otherwise" $ do
+      let body = encode (object ["username" .= ("alice" :: Text), "password" .= ("test-password" :: Text)])
+      overHttps <- request methodPost "/api/login" [("Content-Type", "application/json"), ("X-Forwarded-Proto", "https")] body
+      overHttp <- login "alice" "test-password"
+      liftIO $ do
+        lookup "Set-Cookie" (simpleHeaders overHttps) `shouldSatisfy` maybe False (BS.isInfixOf "Secure")
+        lookup "Set-Cookie" (simpleHeaders overHttp) `shouldSatisfy` maybe False (not . BS.isInfixOf "Secure")
+
   describe "other requests" $ with demoApp $
     it "answers unknown URLs with a JSON 404" $
       get "/api/nope" `shouldRespondWith` errorCode 404 "not_found"
@@ -173,11 +237,11 @@ spec = do
       application <- demoApp
       let loginRequest =
             WaiTest.SRequest
-              (WaiTest.setPath defaultRequest {requestMethod = methodPost} "/api/login")
+              (WaiTest.setPath defaultRequest {requestMethod = methodPost, requestHeaders = jsonType} "/api/login")
               (encode (object ["username" .= ("alice" :: Text), "password" .= ("test-password" :: Text)]))
           oversized =
             WaiTest.setPath
-              defaultRequest {requestMethod = methodPost, requestBodyLength = KnownLength 70000}
+              defaultRequest {requestMethod = methodPost, requestHeaders = jsonType, requestBodyLength = KnownLength 70000}
               "/api/transfers"
       response <- WaiTest.runSession (WaiTest.srequest loginRequest >> WaiTest.request oversized) application
       errorCodeOf (WaiTest.simpleBody response) `shouldBe` Just "payload_too_large"
@@ -195,11 +259,15 @@ spec = do
 
 -- | The API over fresh in-memory stores with the demo data and demo users.
 demoApp :: IO Application
-demoApp = do
+demoApp = demoAppWith False
+
+-- | The same, saying whether it sits behind a trusted proxy.
+demoAppWith :: Bool -> IO Application
+demoAppWith trustProxy = do
   store <- newInMemoryStore
   users <- newInMemoryUserStore
   seedDemoData "test-password" store users
-  app (Env store users False)
+  app =<< newEnv store users SecureOverHttps trustProxy
 
 -- | A working login, but a ledger store where every operation throws,
 -- standing in for "the database is down".
@@ -208,7 +276,7 @@ crashingApp = do
   users <- newInMemoryUserStore
   hash <- hashPassword "test-password"
   _ <- storeCreateUser users (User (Username "alice") RoleCustomer) hash
-  app (Env crashingStore users False)
+  app =<< newEnv crashingStore users SecureOverHttps False
 
 crashingStore :: LedgerStore
 crashingStore =
@@ -216,6 +284,8 @@ crashingStore =
     { storeOpenAccount = \_ _ _ _ -> boom
     , storeGetAccount = const boom
     , storeListAccounts = boom
+    , storeListAccountsOwnedBy = const boom
+    , storeSetAccountOwner = \_ _ -> boom
     , storeEntries = const boom
     , storeTransfer = \_ _ -> boom
     }
@@ -226,7 +296,18 @@ crashingStore =
 -- Requests ------------------------------------------------------------------------
 
 login :: Text -> Text -> WaiSession st SResponse
-login name password = post "/api/login" (encode (object ["username" .= name, "password" .= password]))
+login name password =
+  request methodPost "/api/login" [("Content-Type", "application/json")] (encode (object ["username" .= name, "password" .= password]))
+
+-- | A login through a proxy that reports the client's address. The first
+-- address is one the client made up; the last is what our proxy saw.
+loginFrom :: Text -> Text -> Text -> WaiSession st SResponse
+loginFrom address name password =
+  request
+    methodPost
+    "/api/login"
+    [("Content-Type", "application/json"), ("X-Forwarded-For", encodeUtf8 ("10.9.9.9, " <> address))]
+    (encode (object ["username" .= name, "password" .= password]))
 
 -- | Log in as a demo user and return the Cookie header to send back:
 -- "ledger_session=<token>". The Set-Cookie header also carries attributes
@@ -244,8 +325,14 @@ getAs cookie path = request methodGet path [("Cookie", cookie)] ""
 postAs :: BS.ByteString -> BS.ByteString -> BL.ByteString -> WaiSession st SResponse
 postAs cookie path = request methodPost path (jsonHeaders cookie)
 
+putAs :: BS.ByteString -> BS.ByteString -> BL.ByteString -> WaiSession st SResponse
+putAs cookie path = request methodPut path (jsonHeaders cookie)
+
 keyedTransfer :: BS.ByteString -> BS.ByteString -> BL.ByteString -> WaiSession st SResponse
 keyedTransfer cookie key = request methodPost "/api/transfers" (("Idempotency-Key", key) : jsonHeaders cookie)
+
+jsonType :: [Header]
+jsonType = [("Content-Type", "application/json")]
 
 jsonHeaders :: BS.ByteString -> [Header]
 jsonHeaders cookie = [("Content-Type", "application/json"), ("Cookie", cookie)]

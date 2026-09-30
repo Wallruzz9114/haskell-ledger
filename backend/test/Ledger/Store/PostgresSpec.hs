@@ -13,7 +13,9 @@ import Data.List (isSuffixOf)
 import Data.Pool (Pool, withResource)
 import Database.PostgreSQL.Simple (Connection, Only (..), execute_, query_)
 import Ledger.Db (newDbPool, runMigrations)
-import Ledger.Store (LedgerStore, UserStore)
+import Control.Monad (void)
+import Ledger.Store (LedgerStore, UserStore (..))
+import Ledger.Types (Role (..), User (..), Username)
 import Ledger.Store.Postgres (newPostgresStore, newPostgresUserStore)
 import Support.StoreContract (storeContract)
 import Support.UserStoreContract (userStoreContract)
@@ -50,8 +52,13 @@ connect url = do
 
 -- | Wipe every table, then hand back a store over the now-empty database.
 -- RESTART IDENTITY resets the id counters, so transfer ids start at 1 again.
-emptyStore :: Pool Connection -> IO LedgerStore
-emptyStore pool = newPostgresStore pool <$ wipe pool
+emptyStore :: Pool Connection -> IO (LedgerStore, Username -> IO ())
+emptyStore pool = do
+  wipe pool
+  -- Accounts can only be owned by users that exist (a foreign key), so the
+  -- contract gets a way to create them.
+  let createUser name = void (storeCreateUser (newPostgresUserStore pool) (User name RoleCustomer) "not-a-real-hash")
+  pure (newPostgresStore pool, createUser)
 
 emptyUserStore :: Pool Connection -> IO UserStore
 emptyUserStore pool = newPostgresUserStore pool <$ wipe pool

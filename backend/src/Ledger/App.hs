@@ -14,18 +14,21 @@
 -- result back into an HTTP response.
 module Ledger.App
   ( Env (..)
+  , CookiePolicy (..)
+  , newEnv
   , app
   , externalAccountId
   ) where
 
 import Control.Exception (SomeException, catch, evaluate)
-import Control.Monad (forM_, unless, void)
+import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, asks, runReaderT)
 import Control.Monad.Trans.Class (lift)
 import Data.Aeson (FromJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
 import qualified Data.ByteString as BS
 import Data.ByteString.Builder (toLazyByteString)
+import Data.Either (fromRight)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 -- Qualified imports again: T.pack and TL.toStrict, so it's always clear
@@ -35,16 +38,19 @@ import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
-import Data.Time (NominalDiffTime, addUTCTime, getCurrentTime)
+import Data.Time (NominalDiffTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Ledger.Auth
 import Ledger.Money (Amount, Cents (..), formatCents, maxAmount, mkAmount)
 import Ledger.Session
 import Ledger.Store
+import Ledger.Throttle
 import Ledger.Types
 import Ledger.Validate
 import Network.HTTP.Types.Header (hContentType)
 import Network.HTTP.Types.Status
-import Network.Wai (Application, Response, responseLBS)
+import Network.Socket (SockAddr (..), hostAddress6ToTuple, hostAddressToTuple)
+import Network.Wai (Application, Request, Response, isSecure, remoteHost, requestHeaders, responseLBS)
+import Network.Wai.Middleware.AddHeaders (addHeaders)
 import Network.Wai.Middleware.RequestSizeLimit
 import System.IO (hPutStrLn, stderr)
 import Web.Cookie (SetCookie (..), defaultSetCookie, parseCookies, renderSetCookie, sameSiteLax)
@@ -55,10 +61,33 @@ import Web.Scotty.Trans
 data Env = Env
   { envStore :: LedgerStore
   , envUsers :: UserStore
-  , -- | Mark the session cookie "Secure" (sent over HTTPS only). On for any
-    -- real deployment; off for http://localhost during development.
-    envSecureCookies :: Bool
+  , envCookiePolicy :: CookiePolicy
+  , -- | Failed-login counts and the limit on password checks at once.
+    envLoginGuard :: LoginGuard
+  , -- | Is the server behind a reverse proxy we trust? Then the client's
+    -- address comes from the proxy's X-Forwarded-For header; otherwise
+    -- every user would seem to share the proxy's address, and one person's
+    -- failed logins could lock everyone out.
+    envTrustProxy :: Bool
   }
+
+-- | When to mark the session cookie "Secure" (sent over HTTPS only).
+data CookiePolicy
+  = -- | Whenever the request came over HTTPS, directly or through a proxy
+    -- that says so (X-Forwarded-Proto: https). The default: a real
+    -- deployment behind HTTPS gets Secure cookies without anyone having to
+    -- remember a setting, and http://localhost still works.
+    SecureOverHttps
+  | SecureAlways
+  | SecureNever
+
+-- | An Env with a fresh login guard allowing 2 password checks at once.
+-- Each check holds a CPU core for ~50 ms, so a small number keeps logins
+-- from ever taking over the whole server.
+newEnv :: LedgerStore -> UserStore -> CookiePolicy -> Bool -> IO Env
+newEnv store users policy trustProxy = do
+  guard <- newLoginGuard 2
+  pure (Env store users policy guard trustProxy)
 
 -- | The type of every request handler.
 --
@@ -95,6 +124,12 @@ instance FromJSON LoginBody where
   parseJSON = withObject "LoginBody" $ \o ->
     LoginBody <$> o .: "username" <*> o .: "password"
 
+-- | { "owner": "bob" }
+newtype SetOwnerBody = SetOwnerBody Text
+
+instance FromJSON SetOwnerBody where
+  parseJSON = withObject "SetOwnerBody" $ \o -> SetOwnerBody <$> o .: "owner"
+
 -- | { "id": "acme-ops", "name": "Acme Operating", "owner": "alice" }
 -- "owner" is optional: it defaults to whoever is logged in.
 data OpenAccountBody = OpenAccountBody Text Text (Maybe Text)
@@ -127,7 +162,12 @@ instance FromJSON DepositBody where
 app :: Env -> IO Application
 -- "f . g" runs g first, then f: limit body size, then catch crashes. The
 -- outermost wrapper sees every request first and every response last.
-app env = jsonErrorsFor500 . limitBodySize <$> scottyAppT (`runReaderT` env) routes
+app env = jsonErrorsFor500 . noStore . limitBodySize <$> scottyAppT (`runReaderT` env) routes
+
+-- | Tell browsers and proxies never to keep a copy of any response. They
+-- carry account balances and other private data.
+noStore :: Application -> Application
+noStore = addHeaders [("Cache-Control", "no-store")]
 
 -- | Refuse request bodies over 64 KB with a JSON 413. Without a limit,
 -- Scotty reads the whole body into memory, so one huge request could use up
@@ -174,26 +214,47 @@ routes = do
 
   post "/api/login" $ do
     LoginBody rawName password <- decodeBody
+    let name = T.toLower (T.strip rawName)
+    address <- clientAddress
+    guard <- lift (asks envLoginGuard)
+    now <- liftIO getCurrentTime
+    -- Too many recent failures for this username or from this address?
+    -- Refuse BEFORE doing any expensive password work.
+    blocked <- liftIO (loginBlockedUntil guard now name address)
+    forM_ blocked $ \retryAt -> do
+      -- ceiling: round up to whole seconds for the Retry-After header.
+      setHeader "Retry-After" (TL.pack (show (ceiling (diffUTCTime retryAt now) :: Integer)))
+      failWith status429 "too_many_attempts" "Too many failed logins. Please wait and try again." >> finish
     users <- lift (asks envUsers)
-    found <- liftIO (storeFindUser users (Username (T.toLower (T.strip rawName))))
-    loggedIn <- liftIO $ case found of
-      Just (user, hash) -> pure (if passwordMatches password hash then Just user else Nothing)
+    -- Check the password in one of the limited slots. Nothing = all busy.
+    checked <- liftIO . withHashSlot guard $ do
+      found <- storeFindUser users (Username name)
+      case found of
+        -- "evaluate" makes the (lazy) check actually run here, inside the
+        -- slot, rather than later when the result is first looked at.
+        Just (user, hash) -> do
+          ok <- evaluate (passwordMatches password hash)
+          pure (if ok then Just user else Nothing)
+        Nothing -> do
+          -- No such user. Hash the password anyway and throw the result
+          -- away, so this answer takes as long as a wrong password would.
+          -- Otherwise the response time would reveal which usernames exist.
+          void (evaluate . T.length =<< hashPassword password)
+          pure Nothing
+    case checked of
       Nothing -> do
-        -- No such user. Hash the password anyway and throw the result away,
-        -- so this answer takes as long as a wrong password would. Otherwise
-        -- the response time would reveal which usernames exist.
-        -- "evaluate" forces the (lazy) hash to actually be computed.
-        void (evaluate . T.length =<< hashPassword password)
-        pure Nothing
-    case loggedIn of
+        setHeader "Retry-After" "1"
+        failWith status503 "login_busy" "The server is busy checking other logins. Please try again in a moment."
       -- The same answer for "no such user" and "wrong password", for the
       -- same reason.
-      Nothing -> failWith status401 "invalid_credentials" "Wrong username or password."
-      Just user -> do
+      Just Nothing -> do
+        liftIO (loginFailed guard now name address)
+        failWith status401 "invalid_credentials" "Wrong username or password."
+      Just (Just user) -> do
+        liftIO (loginSucceeded guard name)
         (token, tokenHash) <- liftIO newSessionToken
-        now <- liftIO getCurrentTime
         liftIO (storeCreateSession users tokenHash (userName user) (addUTCTime sessionLifetime now))
-        secure <- lift (asks envSecureCookies)
+        secure <- cookieShouldBeSecure
         setHeader "Set-Cookie" (sessionCookie secure token sessionLifetime)
         json (userJson user)
 
@@ -202,7 +263,7 @@ routes = do
     mToken <- sessionToken
     -- forM_ over a Maybe runs the action only if there's a token.
     forM_ mToken (liftIO . storeDeleteSession users . hashToken)
-    secure <- lift (asks envSecureCookies)
+    secure <- cookieShouldBeSecure
     -- An empty cookie that expires immediately makes the browser drop it.
     setHeader "Set-Cookie" (sessionCookie secure "" 0)
     status status204
@@ -222,9 +283,15 @@ routes = do
     -- These "lifts" are how Haskell mixes several capabilities (web, reader,
     -- IO) in one function. You'll see the same three-line shape below.
     store <- lift (asks envStore)
-    ledgerAccounts <- liftIO (storeListAccounts store)
-    -- A list comprehension with a filter: only the accounts this user may
-    -- see. Customers get their own; admins get everything.
+    -- Admins get every account; customers only their own, filtered by the
+    -- store (in Postgres, by the database) rather than here.
+    ledgerAccounts <-
+      liftIO $
+        if canSeeAllAccounts user
+          then storeListAccounts store
+          else storeListAccountsOwnedBy store (userName user)
+    -- canView again, as a second line of defence: a list comprehension
+    -- with a filter.
     json [accountJson a b | (a, b) <- ledgerAccounts, canView user a]
 
   post "/api/accounts" $ do
@@ -256,6 +323,35 @@ routes = do
     -- param "id" reads the ":id" part of the URL.
     (account, bal) <- requireVisibleAccount user =<< param "id"
     json (accountJson account bal)
+
+  -- Give an account an owner. Admins only. Accounts opened before users
+  -- existed have no owner, which leaves them unusable: nobody can send from
+  -- them and customers can't see them. This is how an admin fixes that (or
+  -- moves an account to another user).
+  put "/api/accounts/:id/owner" $ do
+    user <- requireUser
+    unless (canAssignOwners user) $
+      forbidden "Only admins can change an account's owner."
+    SetOwnerBody rawOwner <- decodeBody
+    aid <- param "id"
+    let owner = Username (T.toLower (T.strip rawOwner))
+    users <- lift (asks envUsers)
+    ownerExists <- liftIO (storeFindUser users owner)
+    when (null ownerExists) $
+      failWith status404 "unknown_user" "No such user." >> finish
+    store <- lift (asks envStore)
+    found <- liftIO (storeGetAccount store (AccountId aid))
+    case found of
+      Nothing -> failWith status404 "unknown_account" ("No account " <> aid <> ".")
+      Just (account, _)
+        | accountKind account /= Customer ->
+            failWith status422 "system_account" "System accounts like \"external\" can't have an owner."
+      Just (_, bal) -> do
+        _ <- liftIO (storeSetAccountOwner store (AccountId aid) owner)
+        updated <- liftIO (storeGetAccount store (AccountId aid))
+        -- maybe default f m: fall back to the balance we already have.
+        maybe (pure ()) (\(account, b) -> json (accountJson account b)) updated
+        when (null updated) $ json (object ["id" .= aid, "balanceCents" .= bal])
 
   get "/api/accounts/:id/entries" $ do
     user <- requireUser
@@ -309,8 +405,12 @@ runTransfer user req = do
   key <- traverse (requireValid "invalid_idempotency_key" . validIdempotencyKey) rawKey
   -- Keys are per user: "alice:payroll-1" and "bob:payroll-1" are different
   -- keys. Otherwise one user's key could replay another user's transfer.
+  --
+  -- Stored as "user:alice:payroll-1". The "user:" prefix keeps these apart
+  -- from the seed's own keys ("seed:..."), and usernames can't contain ":",
+  -- so no two users' keys can ever run together.
   let Username name = userName user
-      scopedKey = IdempotencyKey . ((name <> ":") <>) <$> key
+      scopedKey = IdempotencyKey . (("user:" <> name <> ":") <>) <$> key
   store <- lift (asks envStore)
   result <- liftIO (storeTransfer store scopedKey req)
   case result of
@@ -357,6 +457,53 @@ requireVisibleAccount user aid = do
   case found of
     Just (account, bal) | canView user account -> pure (account, bal)
     _ -> failWith status404 "unknown_account" ("No account " <> aid <> ".") >> finish
+
+-- | Should the session cookie be marked Secure for this request?
+cookieShouldBeSecure :: Handler Bool
+cookieShouldBeSecure = do
+  policy <- lift (asks envCookiePolicy)
+  httpRequest <- request
+  let overHttps =
+        isSecure httpRequest
+          || lookup "X-Forwarded-Proto" (requestHeaders httpRequest) == Just "https"
+  pure $ case policy of
+    SecureAlways -> True
+    SecureNever -> False
+    SecureOverHttps -> overHttps
+
+-- | The network address the request came from, e.g. "203.0.113.7", used to
+-- count failed logins per address.
+--
+-- Behind a trusted reverse proxy (envTrustProxy), that's the LAST address
+-- in X-Forwarded-For: the one our proxy saw. Earlier entries are whatever
+-- the client claimed, so they're ignored. Without a trusted proxy the header
+-- is ignored entirely, since anyone could send a fake one.
+clientAddress :: Handler Text
+clientAddress = do
+  httpRequest <- request
+  trustProxy <- lift (asks envTrustProxy)
+  let forwarded = do
+        headerValue <- lookup "X-Forwarded-For" (requestHeaders httpRequest)
+        -- "a, b, c" -> the last non-empty entry, trimmed.
+        case filter (not . T.null) (map T.strip (T.splitOn "," (decodeUtf8Lenient headerValue))) of
+          [] -> Nothing
+          entries -> Just (last entries)
+  pure $ case (trustProxy, forwarded) of
+    (True, Just address) -> address
+    _ -> connectionAddress httpRequest
+  where
+    decodeUtf8Lenient = fromRight "" . decodeUtf8'
+
+-- | The address of the machine connected to us.
+connectionAddress :: Request -> Text
+connectionAddress httpRequest =
+  case remoteHost httpRequest of
+    -- The port changes with every connection, so only the host counts.
+    SockAddrInet _port host ->
+      let (a, b, c, d) = hostAddressToTuple host
+       in T.intercalate "." (map (T.pack . show) [a, b, c, d])
+    SockAddrInet6 _port _flow host _scope -> T.pack (show (hostAddress6ToTuple host))
+    other -> T.pack (show other)
 
 -- | Reply 403 and stop.
 forbidden :: Text -> Handler ()
@@ -406,6 +553,15 @@ sessionCookie secure token maxAge =
 -- which a it wants (OpenAccountBody, TransferBody...) by how it uses it.
 decodeBody :: FromJSON a => Handler a
 decodeBody = do
+  -- Only accept bodies that say they're JSON. A web page on another site
+  -- can make a browser POST a plain form (text/plain, form-urlencoded) with
+  -- your cookies attached, but it can't send application/json without the
+  -- browser asking this server first (and this server never says yes).
+  -- So this blocks cross-site request forgery even where SameSite=Lax
+  -- doesn't (for example, from a sibling subdomain).
+  contentType <- header "Content-Type"
+  unless (maybe False (("application/json" `TL.isPrefixOf`) . TL.toLower) contentType) $
+    failWith status415 "unsupported_media_type" "Send the request body as JSON, with Content-Type: application/json." >> finish
   payload <- body
   case eitherDecode payload of
     Right a -> pure a

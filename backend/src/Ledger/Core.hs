@@ -15,6 +15,7 @@ module Ledger.Core
   ( Ledger
   , emptyLedger
   , openAccount
+  , setAccountOwner
   , lookupAccount
   , listAccounts
   , balanceOf
@@ -90,6 +91,17 @@ openAccount aid name kind owner ledger
                 , ledgerEntries = Map.insert aid [] (ledgerEntries ledger)
                 }
             )
+
+-- | Give a customer account an owner (used by admins to fix up accounts
+-- opened before accounts had owners). Nothing if there's no such account,
+-- or it's a system account like "external", which must never be owned:
+-- whoever owned it could send money out of it.
+setAccountOwner :: AccountId -> Username -> Ledger -> Maybe Ledger
+setAccountOwner aid owner ledger = case Map.lookup aid (ledgerAccounts ledger) of
+  Just account
+    | accountKind account == Customer ->
+        Just ledger {ledgerAccounts = Map.insert aid account {accountOwner = Just owner} (ledgerAccounts ledger)}
+  _ -> Nothing
 
 -- | Find an account by ID. Maybe because it might not exist.
 --

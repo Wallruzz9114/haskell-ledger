@@ -59,6 +59,17 @@ newPostgresStore pool =
           _ -> Nothing
     , storeListAccounts = withConn $ \conn ->
         map accountRow <$> query_ conn "SELECT id, name, kind, owner, balance FROM accounts ORDER BY id"
+    , storeListAccountsOwnedBy = \owner -> withConn $ \conn ->
+        map accountRow
+          <$> query conn "SELECT id, name, kind, owner, balance FROM accounts WHERE owner = ? ORDER BY id" (Only (usernameText owner))
+    , storeSetAccountOwner = \aid owner -> withConn $ \conn -> do
+        -- Only customer accounts: "external" must never have an owner.
+        updated <-
+          execute
+            conn
+            "UPDATE accounts SET owner = ? WHERE id = ? AND kind = 'customer'"
+            (usernameText owner, accountIdText aid)
+        pure (updated == 1)
     , storeEntries = \aid -> withConn $ \conn -> do
         -- Distinguish "no such account" (Nothing) from "no entries yet"
         -- (Just []), the same as the in-memory store.

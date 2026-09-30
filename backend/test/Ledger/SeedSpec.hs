@@ -58,13 +58,19 @@ spec = do
     storeListAccounts store `shouldReturn` once
     storeFindUser users (Username "alice") `shouldReturn` aliceBefore
 
-  it "stops with instructions if a demo account exists without its owner" $ do
+  it "gives a demo account left over from before users existed its owner" $ do
     store <- newInMemoryStore
     users <- newInMemoryUserStore
-    -- An account left over from before users existed: no owner.
+    -- An account from before accounts had owners.
     _ <- storeOpenAccount store (AccountId "acme-ops") "Acme Operating" Customer Nothing
+    seedDemoData "pw" store users
+    fmap (accountOwner . fst) <$> storeGetAccount store (AccountId "acme-ops") `shouldReturn` Just (Just (Username "alice"))
+
+  it "refuses to take over a demo account that belongs to someone else" $ do
+    store <- newInMemoryStore
+    users <- newInMemoryUserStore
+    _ <- storeOpenAccount store (AccountId "acme-ops") "Somebody Else's" Customer (Just (Username "mallory"))
     -- "try" catches the exception and returns it as a Left instead of
     -- letting it crash the test. "fail" in IO throws an IOException.
     result <- try (seedDemoData "pw" store users) :: IO (Either IOException ())
     result `shouldSatisfy` isLeft
-

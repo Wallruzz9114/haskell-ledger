@@ -18,7 +18,7 @@ module Ledger.Seed
   , SeedTransfer (..)
   ) where
 
-import Control.Monad (forM_, unless, void)
+import Control.Monad (forM_, void)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Ledger.Money (mkAmount)
@@ -66,17 +66,22 @@ seedDemoData password store users = do
         void (storeCreateUser users (User (Username name) role) hash)
   forM_ demoAccounts $ \(aid, name, owner) ->
     storeOpenAccount store (AccountId aid) name Customer (Just (Username owner))
-  -- If a demo account already existed WITHOUT the right owner (a database
-  -- seeded before users existed), opening it again changed nothing. Stop
-  -- with instructions rather than leave accounts nobody can use.
+  -- A demo account that already existed from before accounts had owners
+  -- has no owner: opening it again changed nothing, so give it its owner
+  -- now. One owned by someone ELSE means the database has other data in
+  -- it; stop rather than take it over.
   forM_ demoAccounts $ \(aid, _, owner) -> do
     found <- storeGetAccount store (AccountId aid)
-    let ownedRight = fmap (accountOwner . fst) found == Just (Just (Username owner))
-    unless ownedRight $
-      fail
-        ( "demo account " <> T.unpack aid <> " exists but isn't owned by " <> T.unpack owner
-            <> ". It was probably created by an older version of the seed. Reset the database with: docker compose down -v"
-        )
+    case accountOwner . fst <$> found of
+      Just (Just current)
+        | current == Username owner -> pure ()
+        | otherwise ->
+            fail
+              ( "demo account " <> T.unpack aid <> " belongs to someone other than " <> T.unpack owner
+                  <> ". Seed an empty database instead (docker compose down -v resets the local one)."
+              )
+      Just Nothing -> void (storeSetAccountOwner store (AccountId aid) (Username owner))
+      Nothing -> fail ("demo account " <> T.unpack aid <> " couldn't be opened")
   forM_ demoTransfers $ \t -> do
     amount <- maybe (fail ("seed amount must be positive: " <> T.unpack (seedKey t))) pure (mkAmount (seedCents t))
     let req = TransferRequest (AccountId (seedFrom t)) (AccountId (seedTo t)) amount (seedMemo t)

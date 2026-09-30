@@ -29,6 +29,7 @@ A full-stack double-entry ledger: a Haskell API that moves money between account
 | `Ledger.Validate` | Rules for the text clients send: account ids and names, memos, idempotency keys. |
 | `Ledger.Auth` | Who may do what: pure permission rules, e.g. `canSendFrom`. |
 | `Ledger.Session` | Argon2 password hashing, and random session tokens stored only as SHA-256 hashes. |
+| `Ledger.Throttle` | Login protection: failed-attempt limits per username and per address, and a cap on password checks running at once. |
 | `Ledger.Seed` | The `external` account every ledger needs, and the demo users and data. |
 | `Ledger.App` | HTTP layer (Scotty): logins, permission checks, and the only place domain errors become status codes. |
 
@@ -52,18 +53,18 @@ Example tests (hspec) cover amount validation, each transfer rule and each rejec
 - 200 concurrent 10-cent transfers from a 1,000-cent account: exactly 100 succeed and the balance ends at zero
 - 200 concurrent transfers in opposite directions between two accounts all succeed, with no deadlocks
 
-The HTTP tests log in as each demo user and check every permission rule: customers see only their own accounts, someone else's account answers 404 as if it didn't exist, nobody can send from an account they don't own (not even an admin), only admins can deposit, logging out ends the session, and one user's idempotency keys can't replay another's transfers.
+The HTTP tests log in as each demo user and check every permission rule and login protection (lockout after repeated failures, per-address limits with and without a trusted proxy, JSON-only bodies, `no-store`, the `Secure` cookie flag): customers see only their own accounts, someone else's account answers 404 as if it didn't exist, nobody can send from an account they don't own (not even an admin), only admins can deposit, logging out ends the session, and one user's idempotency keys can't replay another's transfers.
 
 The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending otherwise:
 
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 82 examples, 0 failures, 1 pending
+# 106 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 91 examples, 0 failures
+# 117 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
@@ -72,7 +73,8 @@ The tests are split by area under `backend/test`:
 | --- | --- |
 | `Ledger/AppSpec.hs` | The HTTP API: logging in and out, permissions, status and error codes, input checks, the body size limit, and a JSON 500 that doesn't leak details |
 | `Ledger/AuthSpec.hs` | The permission rules in `Ledger.Auth` |
-| `Ledger/SessionSpec.hs` | Password hashing and session tokens |
+| `Ledger/SessionSpec.hs` | Password hashing (including hashes made by other Argon2 tools) and session tokens |
+| `Ledger/ThrottleSpec.hs` | Failed-login limits and the password-check slots |
 | `Ledger/UserStoreSpec.hs` | The user store contract against the in-memory store |
 | `Ledger/MoneySpec.hs` | `mkAmount` (including the maximum amount) and `formatCents` |
 | `Ledger/ValidateSpec.hs` | The rules for account ids and names, memos and idempotency keys |
@@ -166,7 +168,7 @@ The demo data is three months (July to September 2026) of activity for two compa
 
 `external` is negative because it's where money enters and leaves the ledger. All balances always sum to zero. The data is defined in [`backend/src/Ledger/Seed.hs`](backend/src/Ledger/Seed.hs).
 
-If `ledger-seed` stops with "exists but isn't owned by", your database was seeded before users existed. Reset it as below.
+If a demo account already exists without an owner (a database seeded before users existed), `ledger-seed` gives it its owner. It stops only if a demo account belongs to someone else, which means the database holds other data.
 
 To wipe everything and start again:
 
@@ -191,7 +193,8 @@ Without `DATABASE_URL`, `cabal run ledger-api` uses the in-memory store and fill
 | --- | --- |
 | `DATABASE_URL` | Use this Postgres database. Unset: in-memory with demo data. |
 | `PORT` | Port to listen on. Default 8080. |
-| `COOKIE_SECURE` | Set to `true` to mark the session cookie HTTPS-only. Leave unset for `http://localhost`; always set it in a real deployment. |
+| `COOKIE_SECURE` | When the session cookie is marked `Secure` (HTTPS only). Unset: whenever the request came over HTTPS, directly or via a proxy sending `X-Forwarded-Proto: https`, which suits both a real deployment and `http://localhost`. `true` or `false` forces it on or off. |
+| `TRUST_PROXY` | Set to `true` when the API sits behind a reverse proxy that sets `X-Forwarded-For`. Login limits per address then use the client's real address instead of the proxy's. Leave unset when clients connect directly, or a client could fake the header. |
 | `DEMO_PASSWORD` | Password for demo users created by the in-memory mode or `ledger-seed`. Default `ledger-demo-2026`. |
 
 ### 4. Look at the data
@@ -219,6 +222,22 @@ SELECT * FROM entries ORDER BY id;                    -- two rows per transfer
 SELECT key, transfer_id, error FROM idempotency_keys; -- remembered outcomes, keys prefixed by user
 SELECT username, role FROM users;
 SELECT username, expires_at FROM sessions;            -- logged-in browsers
+```
+
+### Upgrading a database from before users existed
+
+Accounts opened before migration `0002` have no owner. Nobody can use them until they get one: customers can't see them and nobody can send from them. The API lists any such accounts when it starts:
+
+```text
+Warning: 1 customer account(s) have no owner, so nobody can use them:
+  legacy-ops
+```
+
+An admin assigns an owner with `PUT /api/accounts/:id/owner`:
+
+```sh
+curl -b admin.txt -X PUT localhost:8080/api/accounts/legacy-ops/owner \
+  -H 'Content-Type: application/json' -d '{"owner": "bob"}'
 ```
 
 ### Changing the database schema
@@ -289,10 +308,13 @@ Every endpoint except `/api/health` and `/api/login` needs a logged-in session (
 | `POST` | `/api/accounts` | logged in | Open an account: `{ "id", "name", "owner"? }`. `owner` defaults to you; only an admin may name someone else. | 201 |
 | `GET` | `/api/accounts/:id` | owner or admin | One account with its balance | 200 |
 | `GET` | `/api/accounts/:id/entries` | owner or admin | An account's ledger entries, newest first | 200 |
+| `PUT` | `/api/accounts/:id/owner` | admin | Give a customer account an owner: `{ "owner" }` | 200 |
 | `POST` | `/api/deposits` | admin | Deposit from outside: `{ "to", "amountCents" }` | 201 |
 | `POST` | `/api/transfers` | owner of `from` | Transfer: `{ "from", "to", "amountCents", "memo"? }`, optional `Idempotency-Key` header. `to` can be anyone's account. | 201 |
 
-An account you can't see answers 404, exactly like one that doesn't exist, so the API never reveals which accounts other people have.
+Request bodies must be sent with `Content-Type: application/json`.
+
+An account you can't see answers 404, exactly like one that doesn't exist, so reading an account never reveals that someone else has it.
 
 Amounts are integer cents: `150000` is $1,500.00. One transfer can move at most $1,000,000,000.00 (`100000000000`).
 
@@ -325,19 +347,33 @@ Errors come back as `{ "error": "<code>", "message": "<text>" }`:
 | 409 | `account_exists` | Opening an account with an id that's taken |
 | 409 | `idempotency_key_reused` | The same `Idempotency-Key` was sent with a different request |
 | 413 | `payload_too_large` | The request body is over 64 KB |
+| 415 | `unsupported_media_type` | The request body wasn't sent as `application/json` |
 | 422 | `same_account` | `from` and `to` are the same account |
 | 422 | `insufficient_funds` | The transfer would take a customer account below zero |
+| 422 | `system_account` | Trying to give a system account (like `external`) an owner |
+| 429 | `too_many_attempts` | Too many failed logins for that username (5 per 15 minutes) or from that address (30 per 15 minutes). `Retry-After` says when to try again. |
 | 500 | `internal_error` | Something failed on the server (for example, the database is down). Details are logged on the server, never sent to the client. |
+| 503 | `login_busy` | Every password-check slot is busy (see [Security](#security)). `Retry-After: 1`. |
 
 ## Security
 
-- **Passwords** are stored only as [Argon2id](https://en.wikipedia.org/wiki/Argon2) hashes, a deliberately slow and memory-hungry algorithm, so a stolen `users` table is expensive to crack. A login for an unknown username still does the same hashing work, so response times don't reveal which usernames exist.
-- **Sessions:** logging in creates 32 random bytes as a session token, sent to the browser in a cookie. The database stores only the token's SHA-256 hash, so a stolen `sessions` table can't be turned into working cookies. Sessions last 7 days, and logging out deletes the session on the server.
-- **The session cookie** is `HttpOnly` (JavaScript can't read it, so an XSS bug can't steal it) and `SameSite=Lax` (other websites can't make the browser send it with their POST requests, which blocks cross-site request forgery). With `COOKIE_SECURE=true` it's also `Secure`, sent over HTTPS only.
-- **Permissions** live in one small pure module, `Ledger.Auth`, and are checked in `Ledger.App` before the store is touched. Accounts you can't see answer 404 rather than 403, so their existence isn't revealed.
-- **Idempotency keys are per user.** `payroll-1` from alice and `payroll-1` from bob are different keys, so one user can't replay another's transfer.
+- **Passwords** are stored only as [Argon2id](https://en.wikipedia.org/wiki/Argon2) hashes (64 MB of memory, 2 passes, a random salt each), a deliberately slow and memory-hungry algorithm, so a stolen `users` table is expensive to crack. They use the standard PHC text format, so other Argon2 tools can read them. A login for an unknown username still does the same hashing work, so response times don't reveal which usernames exist.
+- **Login protection.** Checking a password takes about 50 ms of a CPU core and 64 MB of memory, so logins are limited in two ways:
+  - **Failed attempts:** 5 wrong passwords for one username, or 30 from one network address, within 15 minutes, and further attempts get `429` without any hashing until the window passes. This also stops password guessing.
+  - **Checks at once:** at most 2 password checks run at the same time. Others get `503 login_busy` straight away instead of queueing, so a flood of logins can't use up the server's memory or cores. The server runs on every core (`-N`), so normal requests carry on during a flood. In a test with 40 simultaneous logins, a health check was still answered in under a millisecond.
 
-Not done yet: rate limiting on `/api/login` (to slow down password guessing), password changes, and sign-up. Demo users are created by `ledger-seed`.
+  The counts live in the server's memory: they're per process and reset on restart. Several servers behind a load balancer would need a shared store for them. Behind a reverse proxy, set `TRUST_PROXY=true` so addresses come from `X-Forwarded-For`; otherwise every user seems to share the proxy's address.
+- **Sessions:** logging in creates 32 random bytes as a session token, sent to the browser in a cookie. The database stores only the token's SHA-256 hash, so a stolen `sessions` table can't be turned into working cookies. Sessions last 7 days, logging out deletes the session on the server, and expired sessions are cleaned up.
+- **The session cookie** is `HttpOnly` (JavaScript can't read it, so an XSS bug can't steal it) and `SameSite=Lax` (other websites can't make the browser send it with their POST requests). It's `Secure` (HTTPS only) whenever the request came over HTTPS, without any setting to remember.
+- **Cross-site request forgery.** Besides `SameSite=Lax`, request bodies must be `application/json`. A form on another website can't send that without the browser asking this server first, which it never allows. That still holds where `SameSite` doesn't help, for example from a sibling subdomain.
+- **No caching.** Every response carries `Cache-Control: no-store`, so browsers and shared proxies don't keep copies of account data.
+- **Permissions** live in one small pure module, `Ledger.Auth`, and are checked in `Ledger.App` before the store is touched. Customers' account lists are filtered by the database.
+- **Idempotency keys are per user.** They're stored as `user:<name>:<key>`, so `payroll-1` from alice and from bob are different keys, and neither can collide with the seed's `seed:...` keys.
+
+Known limits:
+
+- **Account ids can be discovered.** Ids are unique across the whole ledger, and you can pay any account. So opening an account with a taken id answers `409 account_exists`, and a transfer to an id that doesn't exist answers `404`. Someone logged in can use that to check whether an id exists, though not what's in the account. Per-user account ids or payee lists would close this.
+- Not done yet: password changes, sign-up, and a shared store for login limits across several servers. Demo users are created by `ledger-seed`.
 
 ## Progress
 
