@@ -1,8 +1,10 @@
 # Haskell Ledger
 
+[![CI](https://github.com/Wallruzz9114/haskell-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Wallruzz9114/haskell-ledger/actions/workflows/ci.yml)
+
 A full-stack double-entry ledger: a Haskell API that moves money between accounts and enforces bookkeeping rules, backed by PostgreSQL, with property-based tests and a React + TypeScript + Redux Toolkit front end.
 
-> **Status: work in progress.** The API, the Postgres store, user logins and the web front end work today. CI and a one-command Docker setup are still to come; see [Progress](#progress).
+> **Status: work in progress.** The API, the Postgres store, user logins, the web front end and CI work today. A one-command Docker setup is still to come; see [Progress](#progress).
 >
 > Built step by step while learning Haskell, so every source file carries beginner-level comments explaining the Haskell it uses.
 
@@ -108,6 +110,17 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 | `src/features/accounts/AccountEntries.test.tsx` | Each entry's counterparty ("To"/"From"), memo, date and signed amount |
 | `src/features/transfers/TransferForm.test.tsx` | Only your own accounts to send from; amounts sent in cents; the same `Idempotency-Key` on an unchanged retry but a new one once the details change (so editing a refused transfer isn't a 409); API errors shown |
 | `src/features/transfers/DepositForm.test.tsx` | Deposits: customer accounts only, and the same key rules as transfers |
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request and every push to `main`, as two jobs in parallel:
+
+| Job | Checks |
+| --- | --- |
+| Backend | Build with GHC 9.4.8 and `-Wall`, hlint (no hints allowed), and the whole test suite, including the Postgres tests against a Postgres 16 service container |
+| Frontend | `npm ci`, typecheck, oxlint, Prettier, Vitest, and a production build |
+
+Compiled Haskell dependencies are cached between runs, so only the first run (or one after changing the cabal file) compiles them all.
 
 ## Tech stack
 
@@ -433,7 +446,7 @@ Known limits:
 - [x] PostgreSQL store, migrations, seed data and Docker Compose
 - [x] Users, sessions and account ownership
 - [x] Front end
-- [ ] CI
+- [x] CI
 - [ ] Run the whole app with `docker compose up`
 
 ## Repository layout
@@ -455,7 +468,7 @@ haskell-ledger/
     src/app/                 # API client (RTK Query), Redux store, money helpers
     src/features/            # auth, accounts and transfers components, each with its tests
     src/index.css            # styles
-  .github/workflows/ci.yml   # CI (later step)
+  .github/workflows/ci.yml   # CI: build, lint and test both halves on every PR
 ```
 
 Because `cabal.project` sits at the root, `cabal build all` works from either the root or `backend/`.

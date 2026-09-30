@@ -1,0 +1,114 @@
+# Continuous integration: every pull request and every push to main runs
+# the same checks we run locally, so a broken change shows up before it's
+# merged. The two jobs run in parallel.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch cancels the run that's still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (Haskell)
+    runs-on: ubuntu-latest
+
+    # A throwaway Postgres for the Postgres store tests. Its database is
+    # called ledger_test: the tests refuse to run against any database
+    # whose name doesn't end in _test, because they empty every table.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledger
+          POSTGRES_DB: ledger_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledger -d ledger_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Postgres driver links against libpq, Postgres's C client library.
+      - name: Install libpq
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+
+      - name: Set up GHC and cabal
+        id: setup
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.4.8'
+          cabal-version: '3.12.1.0'
+
+      # Compiling every dependency takes a long time, so keep the compiled
+      # packages between runs. The cache is rebuilt only when the cabal
+      # file or cabal.project changes.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.setup.outputs.cabal-store }}
+            dist-newstyle
+          key: ${{ runner.os }}-ghc-9.4.8-${{ hashFiles('cabal.project', 'backend/*.cabal') }}
+          restore-keys: |
+            ${{ runner.os }}-ghc-9.4.8-
+
+      - name: Build
+        run: |
+          cabal update
+          cabal build all --enable-tests
+
+      - name: Set up hlint
+        uses: haskell-actions/hlint-setup@v2
+        with:
+          version: '3.8'
+
+      - name: hlint
+        uses: haskell-actions/hlint-run@v2
+        with:
+          path: '["backend/src/", "backend/app/", "backend/seed/", "backend/test/"]'
+          fail-on: suggestion
+
+      - name: Test (including the Postgres store)
+        env:
+          TEST_DATABASE_URL: postgresql://ledger:ledger@localhost:5432/ledger_test
+        run: cabal test all --enable-tests --test-show-details=direct
+
+  frontend:
+    name: Frontend (React)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # npm ci installs exactly what package-lock.json lists.
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
