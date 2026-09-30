@@ -13,7 +13,7 @@ module Support.StoreContract
 import Control.Concurrent.Async (forConcurrently, replicateConcurrently)
 import Data.Bifunctor (first)
 import Data.Either (isRight)
-import Data.Time (addUTCTime, getCurrentTime)
+import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime)
 import qualified Data.Text as T
 import Ledger.Money
 import Ledger.Store
@@ -81,6 +81,13 @@ storeContract emptyStoreAndUsers = do
     -- microseconds, hence the one-second allowance).
     map entryCreatedAt bobEntries
       `shouldSatisfy` all (\t -> t >= addUTCTime (-1) startedAt && t <= addUTCTime 1 finishedAt)
+
+  it "records a transfer at a chosen time when asked (for demo data)" $ do
+    store <- seeded
+    let july = UTCTime (fromGregorian 2026 7 2) 34200 -- 2026-07-02 09:30 UTC
+    Right t <- storeTransferAt store july Nothing (transfer alice bob 10)
+    transferCreatedAt t `shouldBe` july
+    fmap (map entryCreatedAt) <$> storeEntries store bob `shouldReturn` Just [july]
 
   it "lists accounts in id order with their balances" $ do
     store <- seeded

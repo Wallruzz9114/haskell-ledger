@@ -60,11 +60,11 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 109 examples, 0 failures, 1 pending
+# 111 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 121 examples, 0 failures
+# 124 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
@@ -79,7 +79,7 @@ The tests are split by area under `backend/test`:
 | `Ledger/MoneySpec.hs` | `mkAmount` (including the maximum amount) and `formatCents` |
 | `Ledger/ValidateSpec.hs` | The rules for account ids and names, memos and idempotency keys |
 | `Ledger/MigrationsSpec.hs` | Every SQL file in `db/migrations` is listed in `Ledger.Db` |
-| `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, gives each account the right owner, and seeding twice changes nothing |
+| `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, gives each account the right owner, is dated July to September in order, and seeding twice changes nothing |
 | `Ledger/CoreSpec.hs` | `checkTransfer`, `applyTransfer` and `openAccount` examples |
 | `Ledger/InvariantsSpec.hs` | The QuickCheck properties |
 | `Ledger/StoreSpec.hs` | The store contract against the in-memory store |
@@ -166,7 +166,7 @@ Demo users (all with the password `ledger-demo-2026`, or whatever `DEMO_PASSWORD
 
 These passwords are published here, so they're for local demos only.
 
-The demo data is three months (July to September 2026) of activity for two companies: 37 transfers in all.
+The demo data is three months (July to September 2026) of activity for two companies: 37 transfers in all, each dated on its own day during business hours, so the entries view reads like a real history.
 
 - **Money coming in:** client payments into `acme-ops` and `globex-ops`.
 - **Regular costs:** monthly payroll funding and payroll runs, rent and software subscriptions.

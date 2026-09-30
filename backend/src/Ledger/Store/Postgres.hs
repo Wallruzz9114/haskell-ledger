@@ -25,6 +25,7 @@ module Ledger.Store.Postgres
 import Data.Aeson (Result (..), Value, fromJSON, toJSON)
 import Data.Pool (Pool, withResource)
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import Database.PostgreSQL.Simple
 import Ledger.Core (checkTransfer)
 import Ledger.Money (Cents (..), unAmount)
@@ -95,13 +96,22 @@ newPostgresStore pool =
                   | (t, a, n, other, memo, at) <- rows
                   ]
               )
-    , storeTransfer = \mkey req -> withConn $ \conn ->
+    , storeTransfer = transferWithTime Nothing
+    , storeTransferAt = transferWithTime . Just
+    }
+  where
+    -- Borrow a connection for the length of one operation.
+    withConn :: (Connection -> IO a) -> IO a
+    withConn = withResource pool
+
+    -- One transfer, at a chosen time or (Nothing) at the database's now().
+    transferWithTime at mkey req = withConn $ \conn ->
         -- One transaction for everything: the idempotency check, the rules,
         -- the writes, and remembering the outcome. All of it commits, or
         -- none of it does.
         withTransaction conn $
           case mkey of
-            Nothing -> transferIn conn req
+            Nothing -> transferIn conn at req
             Just key -> do
               -- Claim the key. If another request already holds it, this
               -- inserts nothing (and if that request hasn't committed yet,
@@ -115,18 +125,13 @@ newPostgresStore pool =
               if claimed == 1
                 then do
                   -- New key: do the transfer, then record how it went.
-                  outcome <- transferIn conn req
+                  outcome <- transferIn conn at req
                   let (tid, err) = case outcome of
                         Right t -> (Just (transferIdNumber t), Nothing)
                         Left e -> (Nothing, Just (toJSON e))
                   _ <- execute conn "UPDATE idempotency_keys SET transfer_id = ?, error = ? WHERE key = ?" (tid, err, keyText key)
                   pure outcome
                 else replay conn key req
-    }
-  where
-    -- Borrow a connection for the length of one operation.
-    withConn :: (Connection -> IO a) -> IO a
-    withConn = withResource pool
 
 -- | The Postgres implementation of 'UserStore'.
 newPostgresUserStore :: Pool Connection -> UserStore
@@ -172,8 +177,8 @@ newPostgresUserStore pool =
     }
 
 -- | Validate and apply one transfer inside an open transaction.
-transferIn :: Connection -> TransferRequest -> IO (Either TransferError Transfer)
-transferIn conn req = do
+transferIn :: Connection -> Maybe UTCTime -> TransferRequest -> IO (Either TransferError Transfer)
+transferIn conn at req = do
   -- Lock both account rows. "ORDER BY id" makes every transfer lock rows in
   -- the same order, so two transfers going opposite ways (A->B and B->A)
   -- can't each hold one lock while waiting for the other (a deadlock).
@@ -194,20 +199,22 @@ transferIn conn req = do
       let amount = amountOf req
           from = accountIdText (reqFrom req)
           to = accountIdText (reqTo req)
+      -- COALESCE(x, y) means "x, or y if x is NULL": the given time, or now.
       -- RETURNING hands back values Postgres generated for the new row: the
       -- id, and the created_at time (so the response shows the same time
       -- the database stored).
       [(tid, createdAt)] <-
         query
           conn
-          "INSERT INTO transfers (from_account, to_account, amount, memo) VALUES (?, ?, ?, ?) RETURNING id, created_at"
-          (from, to, amount, reqMemo req)
+          "INSERT INTO transfers (from_account, to_account, amount, memo, created_at) \
+          \VALUES (?, ?, ?, ?, COALESCE(?, now())) RETURNING id, created_at"
+          (from, to, amount, reqMemo req, at)
       -- executeMany runs one INSERT for each tuple in the list.
       _ <-
         executeMany
           conn
-          "INSERT INTO entries (transfer_id, account_id, amount) VALUES (?, ?, ?)"
-          [(tid, from, negate amount), (tid, to, amount)]
+          "INSERT INTO entries (transfer_id, account_id, amount, created_at) VALUES (?, ?, ?, ?)"
+          [(tid, from, negate amount, createdAt), (tid, to, amount, createdAt)]
       _ <- execute conn "UPDATE accounts SET balance = balance - ? WHERE id = ?" (amount, from)
       _ <- execute conn "UPDATE accounts SET balance = balance + ? WHERE id = ?" (amount, to)
       pure (Right (Transfer (TransferId tid) (reqFrom req) (reqTo req) (Cents amount) (reqMemo req) createdAt))
