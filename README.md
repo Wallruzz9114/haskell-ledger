@@ -18,7 +18,47 @@ A full-stack double-entry ledger: a Haskell API that moves money between account
 - **Users and permissions.** Users log in with a password and get a session cookie. Customers see and send from only their own accounts; admins see everything and are the only ones who can bring money in (deposits). See [Security](#security).
 - **The database checks the rules too.** Constraints reject a negative customer balance, a non-positive amount, and a transfer whose entries don't sum to zero, even if the application code were wrong.
 
-## Design
+## Design decisions
+
+The choices I'd want to talk about, and why I made them.
+
+- **Money is integer cents, and a transfer amount can't be invalid.** `Cents` wraps an `Integer`, so there's no floating-point rounding anywhere, from Postgres to the browser. `Amount` can only be built by `mkAmount`, which rejects zero, negatives and anything over $1B. Every function that takes an `Amount` can rely on that without checking again.
+- **The rules live in one pure function.** `Ledger.Core.checkTransfer` decides whether a transfer is allowed, with no database or HTTP involved. The in-memory store and the Postgres store both call it, so there's one copy of the rules and it's easy to test.
+- **Storage is an interface.** `LedgerStore` is a record of functions with two implementations: STM in memory for fast tests, and Postgres. Both pass the same contract tests. Only the two programs' `main` functions choose which one to use.
+- **Overdrafts are impossible, not just unlikely.** In Postgres, a transfer locks both account rows (`SELECT ... FOR UPDATE`, always in id order, so two opposite transfers can't deadlock) before reading balances. A `CHECK` constraint rejects a negative customer balance even if the code were wrong. A test fires 200 concurrent transfers at one account and checks that exactly the affordable ones succeed.
+- **Retries are safe.** An `Idempotency-Key` is claimed in the same transaction as the transfer, and its outcome is remembered, failures included, so a retry gets the same answer. Keys are scoped per user, so nobody can replay someone else's transfer. The front end keeps one key per draft and changes it when the details change.
+- **Errors are values.** `applyTransfer` returns `Either TransferError`, not exceptions, and `Ledger.App` turns each error into an HTTP status in one function, so the compiler warns if a new error isn't handled.
+- **One set of types for both languages.** The TypeScript types the front end uses are generated from the Haskell ones. Renaming a field breaks the front end's build instead of breaking it at runtime.
+- **Tested for properties, not just examples.** QuickCheck runs random sequences of transfers and checks what must always be true: balances sum to zero, no customer goes negative, and every balance equals the sum of its entries.
+
+**Tradeoffs and what I'd do next:**
+- **Named outside parties.** Clients and vendors are all one `external` account, so the dashboard's top sources say "External". Real payees would be the next model change.
+- **Paging and search in SQL.** The transactions page pages and searches in Haskell over the account's entries. At real volumes that should happen in the database.
+- **Shared login limits.** Login limits live in the server's memory, which only works for a single instance. With several instances they'd need to be in Postgres or Redis.
+- **Missing features:** sign-up, password changes, and observability (structured logs and metrics).
+
+## How I built this, with Claude Code
+
+This is my first Haskell project. I started from a tutorial (the domain types, the pure core, the HTTP layer) and typed the early steps myself, following the compiler errors. From there I used [Claude Code](https://claude.com/claude-code) as a pair programmer to take it much further than the tutorial: Postgres, logins and permissions, the web app, the dashboard, CI and Docker.
+
+How I worked with it:
+
+- **One pull request per step.** The work was planned in steps, with a branch and a PR for each, and CI required to pass before merging. `main` is protected.
+- **Review before merge.** I asked for code reviews and security reviews on the larger PRs, and every finding was fixed or consciously deferred.
+- **Reproduce first, then fix, then test.** A bug had to be shown to fail (against the running API, or in a test) before it was fixed, and each fix came with a test that fails without it.
+- **Checking the tests themselves.** Several times we removed a fix on purpose to make sure its test really failed.
+- **Checking the real thing.** Every feature was also run for real, against the actual API, Postgres, Docker and a headless browser, not just in unit tests.
+
+Some things that happened along the way:
+
+- **An idempotency bug.** A review found that editing a refused transfer and resending it failed with "key already used". We reproduced it against the API, fixed the front end to use a new key when the details change, and added a test.
+- **A denial-of-service risk.** Argon2 runs as a blocking C call, so a flood of logins could stall the server. We measured it, limited concurrent password checks, added lockouts, and confirmed a health check still answers in under a millisecond during a 40-login burst.
+- **A dependency problem.** A new crypton release broke the Docker build on Apple Silicon. The fix was pinning every dependency with `cabal.project.freeze`, so my laptop, CI and Docker all build the same code.
+- **A Haskell lesson from the tests.** A test hung forever because `[0 .. 4]` as `NominalDiffTime` counts in picoseconds.
+
+What I learned about Haskell: modelling a domain with types first and letting the compiler hold everything else to it; smart constructors; `Either` for errors; keeping the core pure and pushing IO to the edges; STM; records of functions as interfaces; Template Haskell (and its stage restriction); property-based testing; and how laziness can surprise you. Every Haskell file has comments written for a beginner, which is how I learned while building.
+
+## Code structure
 
 | Module | Responsibility |
 | --- | --- |
