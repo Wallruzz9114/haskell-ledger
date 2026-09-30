@@ -35,12 +35,14 @@ describe('DashboardPage', () => {
   it('reads the chart with the keyboard, and has a table of every day', async () => {
     fakeApi({ 'GET /api/dashboard': () => ({ status: 200, body: dashboardFor() }) })
     renderWithStore(<DashboardPage />)
-    const chart = await screen.findByRole('img', { name: /Balance over the last 3 days/ })
+    const chart = await screen.findByRole('slider', { name: 'Balance by day, last 3 days' })
     // Focusing the chart shows the latest day; the left arrow steps back.
     fireEvent.focus(chart)
     expect(screen.getByRole('status')).toHaveTextContent('Sep 30$39,913.00')
     fireEvent.keyDown(chart, { key: 'ArrowLeft' })
     expect(screen.getByRole('status')).toHaveTextContent('Sep 29$39,500.00')
+    // Screen readers hear the selected day.
+    expect(chart).toHaveAttribute('aria-valuetext', 'Sep 29: $39,500.00')
     // The table view lists every day, for anyone who can't use the chart.
     expect(screen.getByText('Show as table')).toBeInTheDocument()
     expect(screen.getAllByRole('row')).toHaveLength(4) // header + 3 days

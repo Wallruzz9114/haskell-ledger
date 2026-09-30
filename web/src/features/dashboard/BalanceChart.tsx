@@ -23,7 +23,7 @@ export function BalanceChart({ points }: Readonly<{ points: BalancePointView[] }
   const values = points.map((p) => p.balanceCents)
   const ticks = niceTicks(Math.min(0, ...values), Math.max(...values))
   const lo = ticks[0]
-  const hi = ticks[ticks.length - 1]
+  const hi = ticks.at(-1) ?? lo
   const x = (i: number) =>
     PAD.left + (points.length === 1 ? PLOT_W : (i / (points.length - 1)) * PLOT_W)
   const y = (v: number) => PAD.top + PLOT_H - ((v - lo) / (hi - lo || 1)) * PLOT_H
@@ -58,14 +58,26 @@ export function BalanceChart({ points }: Readonly<{ points: BalancePointView[] }
   }
 
   const point = active === null ? null : points[active]
+  // The day read out to screen readers: the hovered or selected one, or the latest.
+  const shown = point ?? points.at(-1)
+  const valueText = shown
+    ? `${formatDay(shown.date)}: ${formatCents(shown.balanceCents)}`
+    : undefined
 
   return (
     <div className="chart">
+      {/* To keyboards and screen readers the chart is a slider over the days:
+          the arrow keys move the selected day, and aria-valuetext reads it
+          out ("Sep 12: $64,613.00"). */}
       <div
         className="chart-plot"
         tabIndex={0}
-        role="img"
-        aria-label={`Balance over the last ${points.length} days, from ${formatCents(values[0])} to ${formatCents(values[values.length - 1])}. Use the arrow keys to read each day.`}
+        role="slider"
+        aria-label={`Balance by day, last ${points.length} days`}
+        aria-valuemin={0}
+        aria-valuemax={points.length - 1}
+        aria-valuenow={active ?? points.length - 1}
+        aria-valuetext={valueText}
         onKeyDown={onKeyDown}
         onFocus={() => setActive(points.length - 1)}
         onBlur={() => setActive(null)}
@@ -116,14 +128,10 @@ export function BalanceChart({ points }: Readonly<{ points: BalancePointView[] }
           )}
         </svg>
         {point && active !== null && (
-          <div
-            className="chart-tooltip"
-            style={{ left: `${(x(active) / WIDTH) * 100}%` }}
-            role="status"
-          >
+          <output className="chart-tooltip" style={{ left: `${(x(active) / WIDTH) * 100}%` }}>
             <span className="muted">{formatDay(point.date)}</span>
             <strong>{formatCents(point.balanceCents)}</strong>
-          </div>
+          </output>
         )}
       </div>
       <details className="chart-table">
