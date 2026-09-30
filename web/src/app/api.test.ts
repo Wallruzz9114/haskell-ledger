@@ -11,7 +11,9 @@ describe('errorMessage', () => {
   })
 
   it('falls back to a hint when the API sent nothing useful', () => {
-    expect(errorMessage({ status: 'FETCH_ERROR', error: 'Failed to fetch' })).toMatch(/port 8080/)
+    expect(errorMessage({ status: 'FETCH_ERROR', error: 'Failed to fetch' })).toMatch(
+      /Couldn't reach the server/,
+    )
   })
 
   it('is null when there is no error', () => {

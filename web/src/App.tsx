@@ -13,7 +13,7 @@ import { TransferForm } from './features/transfers/TransferForm'
  * back on the login page.
  */
 export default function App() {
-  const { data: me, error, isLoading } = useMeQuery()
+  const { data: me, error, isLoading, isFetching, refetch } = useMeQuery()
 
   if (isLoading) {
     return (
@@ -23,9 +23,17 @@ export default function App() {
     )
   }
   if (error && !isUnauthorized(error)) {
+    // The API couldn't be reached (or failed). Say so, and offer a retry
+    // instead of leaving a dead end that needs a page reload.
     return (
-      <div className="page">
-        <p className="error">{errorMessage(error)}</p>
+      <div className="page narrow">
+        <h1>Ledger</h1>
+        <section className="card stack" role="alert">
+          <p className="error">{errorMessage(error)}</p>
+          <button type="button" onClick={() => refetch()} disabled={isFetching}>
+            {isFetching ? 'Trying…' : 'Try again'}
+          </button>
+        </section>
       </div>
     )
   }
