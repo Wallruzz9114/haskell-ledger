@@ -22,7 +22,8 @@ services:
       # "docker compose down -v" deletes it and starts fresh.
       - pgdata:/var/lib/postgresql/data
       # Scripts here run once, when the data volume is first created.
-      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      # (Kept next to the migrations in backend/db/.)
+      - ./backend/db/docker-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
       interval: 2s
