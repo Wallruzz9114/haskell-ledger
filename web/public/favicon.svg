@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- A ledger book with two balancing lines: the double entry. -->
+  <rect x="4" y="3" width="24" height="26" rx="4" fill="#3b5bdb"/>
+  <rect x="9" y="10" width="14" height="2.5" rx="1.25" fill="#ffffff"/>
+  <rect x="9" y="15" width="14" height="2.5" rx="1.25" fill="#ffffff"/>
+  <rect x="9" y="20" width="9" height="2.5" rx="1.25" fill="#9fb3ff"/>
+</svg>
