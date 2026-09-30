@@ -31,6 +31,7 @@ module Ledger.Api
   , UserView (..)
   , userView
   , ErrorBody (..)
+  , HealthView (..)
   , DashboardView (..)
   , BalancePointView (..)
   , PartyView (..)
@@ -78,9 +79,18 @@ data UserView = UserView
   }
 
 -- | Every error response: { "error": "insufficient_funds", "message": "..." }.
+--   Unexpected failures (500 and 503) also carry "requestId": the same id
+--   is in the server's log line, so a user's report can be matched to it.
 data ErrorBody = ErrorBody
   { errorBodyError :: Text
   , errorBodyMessage :: Text
+  , errorBodyRequestId :: Maybe Text
+  }
+
+-- | GET /api/health: { "status": "ok" }, or "unavailable" (with a 503)
+--   when the store can't be reached.
+newtype HealthView = HealthView
+  { healthViewStatus :: Text
   }
 
 accountView :: Account -> Cents -> AccountView
@@ -211,7 +221,9 @@ $(deriveJSONAndTypeScript defaultOptions {constructorTagModifier = map toLower .
 -- only use functions imported from another module.
 $(deriveJSONAndTypeScript (fieldsWithout "accountView") ''AccountView)
 $(deriveJSONAndTypeScript (fieldsWithout "userView") ''UserView)
-$(deriveJSONAndTypeScript (fieldsWithout "errorBody") ''ErrorBody)
+-- optionalFieldsWithout: "requestId" is left out when there isn't one.
+$(deriveJSONAndTypeScript (optionalFieldsWithout "errorBody") ''ErrorBody)
+$(deriveJSONAndTypeScript (fieldsWithout "healthView") ''HealthView)
 $(deriveJSONAndTypeScript (fieldsWithout "balancePointView") ''BalancePointView)
 $(deriveJSONAndTypeScript (fieldsWithout "partyView") ''PartyView)
 $(deriveJSONAndTypeScript (fieldsWithout "dashboardView") ''DashboardView)
@@ -236,6 +248,7 @@ apiDeclarations =
     , getTypeScriptDeclarations (Proxy :: Proxy Entry)
     , getTypeScriptDeclarations (Proxy :: Proxy Transfer)
     , getTypeScriptDeclarations (Proxy :: Proxy ErrorBody)
+    , getTypeScriptDeclarations (Proxy :: Proxy HealthView)
     , getTypeScriptDeclarations (Proxy :: Proxy DashboardView)
     , getTypeScriptDeclarations (Proxy :: Proxy BalancePointView)
     , getTypeScriptDeclarations (Proxy :: Proxy PartyView)

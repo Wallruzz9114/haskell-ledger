@@ -121,6 +121,7 @@ test-suite spec
       Ledger.AppSpec
       Ledger.AuthSpec
       Ledger.CoreSpec
+      Ledger.DbSpec
       Ledger.InvariantsSpec
       Ledger.MigrationsSpec
       Ledger.MoneySpec

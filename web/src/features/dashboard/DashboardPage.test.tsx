@@ -47,4 +47,28 @@ describe('DashboardPage', () => {
     expect(screen.getByText('Show as table')).toBeInTheDocument()
     expect(screen.getAllByRole('row')).toHaveLength(4) // header + 3 days
   })
+
+  it('offers a retry when the API is temporarily unavailable', async () => {
+    let up = false
+    fakeApi({
+      'GET /api/dashboard': () =>
+        up
+          ? { status: 200, body: dashboardFor() }
+          : {
+              status: 503,
+              body: {
+                error: 'service_unavailable',
+                message: 'Temporarily unavailable.',
+                requestId: 'ab12cd34',
+              },
+            },
+    })
+    renderWithStore(<DashboardPage />)
+    expect(
+      await screen.findByText('Temporarily unavailable. (reference ab12cd34)'),
+    ).toBeInTheDocument()
+    up = true
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByText('$39,913.00', { selector: '.hero-figure' })).toBeInTheDocument()
+  })
 })
