@@ -393,13 +393,13 @@ Known limits:
 haskell-ledger/
   cabal.project              # points cabal and the editor at backend/
   docker-compose.yml         # Postgres and Adminer for local development
-  docker/postgres-init/      # creates the ledger_test database on first start
   backend/
     double-entry-ledger.cabal
     app/Main.hs              # the API server: picks a store, starts the server
     seed/Main.hs             # the ledger-seed command: adds demo data to DATABASE_URL
     src/Ledger/*.hs          # the library (see Design)
     db/migrations/*.sql      # schema changes, applied in order at startup
+    db/docker-init/          # run by the Postgres container on first start: creates ledger_test
     test/                    # one *Spec.hs per area, plus shared Support/ modules
     api.http                 # sample requests for the REST Client extension
   web/                       # Vite + React + TypeScript (later step)
