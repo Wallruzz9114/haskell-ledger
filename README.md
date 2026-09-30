@@ -446,7 +446,7 @@ Known limits:
 - [x] PostgreSQL store, migrations, seed data and Docker Compose
 - [x] Users, sessions and account ownership
 - [x] Front end
-- [ ] CI
+- [x] CI
 - [ ] Run the whole app with `docker compose up`
 
 ## Repository layout
