@@ -60,11 +60,11 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 106 examples, 0 failures, 1 pending
+# 109 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 117 examples, 0 failures
+# 121 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
