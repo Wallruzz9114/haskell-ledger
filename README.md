@@ -2,7 +2,7 @@
 
 A full-stack double-entry ledger: a Haskell API that moves money between accounts and enforces bookkeeping rules, backed by PostgreSQL, with property-based tests and a React + TypeScript + Redux Toolkit front end.
 
-> **Status: work in progress.** The API, its test suite, the Postgres store and user logins work today. The front end and CI are still to come; see [Progress](#progress).
+> **Status: work in progress.** The API, the Postgres store, user logins and the web front end work today. CI and a one-command Docker setup are still to come; see [Progress](#progress).
 >
 > Built step by step while learning Haskell, so every source file carries beginner-level comments explaining the Haskell it uses.
 
@@ -93,14 +93,27 @@ The tests are split by area under `backend/test`:
 
 The Postgres tests empty every table between tests. As a safety net, they refuse to run unless the database's name ends in `_test`.
 
+### Front-end tests
+
+The front end has its own Vitest suite (`cd web && npm test`), with one test file next to each piece it tests. The tests replace `fetch` with a fake API, so they need no server:
+
+| File | What it tests |
+| --- | --- |
+| `src/app/money.test.ts` | Formatting cents and parsing typed amounts, with no floating-point rounding and the API's maximum |
+| `src/app/api.test.ts` | Reading error messages and 401s from API responses |
+| `src/App.test.tsx` | Logged out shows the login page, logging in shows your accounts, logging out goes back |
+| `src/features/auth/LoginPage.test.tsx` | Wrong-password and lockout messages |
+| `src/features/accounts/AccountsPanel.test.tsx` | Customers vs admins: what each sees |
+| `src/features/transfers/TransferForm.test.tsx` | Only your own accounts to send from; amounts sent in cents; the same `Idempotency-Key` reused on retry; API errors shown |
+
 ## Tech stack
 
 | Layer | Technology |
 | --- | --- |
 | Backend | Haskell (GHC 9.4.8), Scotty, STM, aeson |
 | Database | PostgreSQL 16, postgresql-simple, resource-pool |
-| Tests | hspec, QuickCheck |
-| Frontend | React, TypeScript, Redux Toolkit (RTK Query), Vite |
+| Tests | hspec, QuickCheck, hspec-wai (backend); Vitest, Testing Library (front end) |
+| Frontend | React 19, TypeScript, Redux Toolkit (RTK Query), Vite, oxlint, Prettier |
 | Tooling | GHCup, cabal, Docker Compose, Node 22, GitHub Actions |
 
 ## Running locally
@@ -110,7 +123,7 @@ Requires:
 - GHC 9.4.8 and cabal (install both with [GHCup](https://www.haskell.org/ghcup/))
 - Docker, for Postgres
 - `libpq`, Postgres's C client library, which the Haskell driver links against. On macOS: `brew install libpq` (or any Homebrew `postgresql@XX`).
-- Node 22, for the front end (later step)
+- Node 22, for the front end
 - Optional, for editor support in `backend/test/Spec.hs`: `cabal install hspec-discover`. The Haskell language server needs the `hspec-discover` program on your `PATH`. `cabal build` and `cabal test` don't, because cabal builds it for them.
 
 ### 1. Start Postgres
@@ -224,6 +237,35 @@ SELECT username, role FROM users;
 SELECT username, expires_at FROM sessions;            -- logged-in browsers
 ```
 
+### 5. Run the front end
+
+With the API running on port 8080, in a second terminal:
+
+```sh
+cd web
+npm install
+npm run dev
+# ➜  Local:   http://localhost:5173/
+```
+
+Open <http://localhost:5173> and log in as one of the demo users:
+
+- **alice** or **bob** see only their own accounts, can send money from them to any account id (for example alice paying `globex-ops`), and can open new accounts for themselves.
+- **admin** sees every account with its owner, makes deposits, opens accounts for users, and assigns owners. Admins can't send money out of customers' accounts, so there's no transfer form.
+
+Click an account to see its double-entry history. Vite forwards `/api` requests to the Haskell server, so the browser only ever talks to one origin: the session cookie just works, and there's no CORS to set up.
+
+Front-end commands, from `web/`:
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Development server with hot reload |
+| `npm test` | Run the Vitest tests once (`npm run test:watch` to keep watching) |
+| `npm run typecheck` | TypeScript type check |
+| `npm run lint` | oxlint |
+| `npm run format` | Prettier (`format:check` to check without changing files) |
+| `npm run build` | Production build into `web/dist` |
+
 ### Upgrading a database from before users existed
 
 Accounts opened before migration `0002` have no owner. Nobody can use them until they get one: customers can't see them and nobody can send from them. The API lists any such accounts when it starts:
@@ -243,17 +285,6 @@ curl -b admin.txt -X PUT localhost:8080/api/accounts/legacy-ops/owner \
 ### Changing the database schema
 
 Add a new file to `backend/db/migrations`, numbered after the last one (for example `0003_add_statements.sql`), and add it to the `migrationFiles` list in [`backend/src/Ledger/Db.hs`](backend/src/Ledger/Db.hs). The API and `ledger-seed` apply it on their next start. Never edit a migration that has already been applied; add a new one instead. `MigrationsSpec` fails if a file is missing from the list.
-
-### Coming in later steps
-
-```sh
-# Front end on http://localhost:5173, in a second terminal
-cd web
-npm install
-npm run dev
-```
-
-In development, Vite will proxy `/api` requests to the Haskell server, so no CORS setup is needed.
 
 ## Try it
 
@@ -383,7 +414,7 @@ Known limits:
 - [x] Tests
 - [x] PostgreSQL store, migrations, seed data and Docker Compose
 - [x] Users, sessions and account ownership
-- [ ] Front end
+- [x] Front end
 - [ ] CI
 - [ ] Run the whole app with `docker compose up`
 
@@ -402,7 +433,10 @@ haskell-ledger/
     db/migrations/*.sql      # schema changes, applied in order at startup
     test/                    # one *Spec.hs per area, plus shared Support/ modules
     api.http                 # sample requests for the REST Client extension
-  web/                       # Vite + React + TypeScript (later step)
+  web/                       # Vite + React + TypeScript front end
+    src/app/                 # API client (RTK Query), Redux store, money helpers
+    src/features/            # auth, accounts and transfers components, each with its tests
+    src/index.css            # styles
   .github/workflows/ci.yml   # CI (later step)
 ```
 
