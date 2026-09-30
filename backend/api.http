@@ -1,14 +1,33 @@
 ### Requests for the REST Client extension (humao.rest-client).
 ### Start the API first (cabal run ledger-api), then click "Send Request"
 ### above any block.
+###
+### Send one of the login requests first. REST Client remembers the session
+### cookie and sends it with every request after that, like a browser.
+### The demo password is in the README.
 
-### Health check
+### Health check (no login needed)
 GET http://localhost:8080/api/health
 
-### List accounts
+### Log in as alice (owns the acme-* accounts)
+POST http://localhost:8080/api/login
+Content-Type: application/json
+
+{ "username": "alice", "password": "ledger-demo-2026" }
+
+### Log in as admin (sees everything, makes deposits)
+POST http://localhost:8080/api/login
+Content-Type: application/json
+
+{ "username": "admin", "password": "ledger-demo-2026" }
+
+### Who am I?
+GET http://localhost:8080/api/me
+
+### List accounts (alice sees only hers; admin sees all)
 GET http://localhost:8080/api/accounts
 
-### Transfer with an idempotency key (send it twice: same result, money moves once)
+### Transfer with an idempotency key (as alice; send it twice: same result, money moves once)
 POST http://localhost:8080/api/transfers
 Content-Type: application/json
 Idempotency-Key: payroll-1
@@ -22,23 +41,38 @@ Idempotency-Key: payroll-1
 
 { "from": "acme-ops", "to": "acme-payroll", "amountCents": 1 }
 
-### Overdraft (expect 422 insufficient_funds)
+### Pay another company's account (as alice)
+POST http://localhost:8080/api/transfers
+Content-Type: application/json
+
+{ "from": "acme-ops", "to": "globex-ops", "amountCents": 32000, "memo": "Invoice GX-1080" }
+
+### Send from someone else's account (as alice: expect 404; as admin: 403)
+POST http://localhost:8080/api/transfers
+Content-Type: application/json
+
+{ "from": "globex-ops", "to": "acme-ops", "amountCents": 100 }
+
+### Overdraft (as alice: expect 422 insufficient_funds)
 POST http://localhost:8080/api/transfers
 Content-Type: application/json
 
 { "from": "acme-payroll", "to": "acme-ops", "amountCents": 99999999 }
 
-### Deposit from outside the ledger
+### Deposit from outside the ledger (admin only; alice gets 403)
 POST http://localhost:8080/api/deposits
 Content-Type: application/json
 
 { "to": "acme-payroll", "amountCents": 50000 }
 
-### Open a new account
+### Open a new account for yourself
 POST http://localhost:8080/api/accounts
 Content-Type: application/json
 
-{ "id": "acme-savings", "name": "Acme Savings" }
+{ "id": "acme-travel", "name": "Acme Travel" }
 
 ### Entries for payroll
 GET http://localhost:8080/api/accounts/acme-payroll/entries
+
+### Log out
+POST http://localhost:8080/api/logout

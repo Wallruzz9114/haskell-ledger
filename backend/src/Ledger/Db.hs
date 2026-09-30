@@ -54,6 +54,7 @@ newDbPool url =
 migrationFiles :: [(FilePath, ByteString)]
 migrationFiles =
   [ ("0001_create_ledger.sql", $(embedFile =<< makeRelativeToProject "db/migrations/0001_create_ledger.sql"))
+  , ("0002_users_and_sessions.sql", $(embedFile =<< makeRelativeToProject "db/migrations/0002_users_and_sessions.sql"))
   ]
 
 -- | The names of every embedded migration, in order.

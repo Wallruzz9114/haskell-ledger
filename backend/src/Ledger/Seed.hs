@@ -11,6 +11,8 @@
 module Ledger.Seed
   ( ensureSystemAccounts
   , seedDemoData
+  , defaultDemoPassword
+  , demoUsers
   , demoAccounts
   , demoTransfers
   , SeedTransfer (..)
@@ -20,6 +22,7 @@ import Control.Monad (forM_, void)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Ledger.Money (mkAmount)
+import Ledger.Session (hashPassword)
 import Ledger.Store
 import Ledger.Types
 
@@ -28,7 +31,7 @@ import Ledger.Types
 -- exists, opening it again just returns AccountAlreadyExists.
 ensureSystemAccounts :: LedgerStore -> IO ()
 ensureSystemAccounts store =
-  void (storeOpenAccount store (AccountId "external") "External (outside the ledger)" External)
+  void (storeOpenAccount store (AccountId "external") "External (outside the ledger)" External Nothing)
 
 -- | One demo transfer. The key makes it repeatable (see seedDemoData).
 data SeedTransfer = SeedTransfer
@@ -49,11 +52,36 @@ data SeedTransfer = SeedTransfer
 -- repeatable. If any transfer is REJECTED (say someone edits the list and
 -- overdraws an account), it stops with an error instead of carrying on
 -- with half the data.
-seedDemoData :: LedgerStore -> IO ()
-seedDemoData store = do
+seedDemoData :: Text -> LedgerStore -> UserStore -> IO ()
+seedDemoData password store users = do
   ensureSystemAccounts store
-  forM_ demoAccounts $ \(aid, name) ->
-    storeOpenAccount store (AccountId aid) name Customer
+  -- Users first, since accounts refer to their owners. An existing user is
+  -- left alone (including their password).
+  forM_ demoUsers $ \(name, role) -> do
+    existing <- storeFindUser users (Username name)
+    case existing of
+      Just _ -> pure ()
+      Nothing -> do
+        hash <- hashPassword password
+        void (storeCreateUser users (User (Username name) role) hash)
+  forM_ demoAccounts $ \(aid, name, owner) ->
+    storeOpenAccount store (AccountId aid) name Customer (Just (Username owner))
+  -- A demo account that already existed from before accounts had owners
+  -- has no owner: opening it again changed nothing, so give it its owner
+  -- now. One owned by someone ELSE means the database has other data in
+  -- it; stop rather than take it over.
+  forM_ demoAccounts $ \(aid, _, owner) -> do
+    found <- storeGetAccount store (AccountId aid)
+    case accountOwner . fst <$> found of
+      Just (Just current)
+        | current == Username owner -> pure ()
+        | otherwise ->
+            fail
+              ( "demo account " <> T.unpack aid <> " belongs to someone other than " <> T.unpack owner
+                  <> ". Seed an empty database instead (docker compose down -v resets the local one)."
+              )
+      Just Nothing -> void (storeSetAccountOwner store (AccountId aid) (Username owner))
+      Nothing -> fail ("demo account " <> T.unpack aid <> " couldn't be opened")
   forM_ demoTransfers $ \t -> do
     amount <- maybe (fail ("seed amount must be positive: " <> T.unpack (seedKey t))) pure (mkAmount (seedCents t))
     let req = TransferRequest (AccountId (seedFrom t)) (AccountId (seedTo t)) amount (seedMemo t)
@@ -62,15 +90,29 @@ seedDemoData store = do
       Right _ -> pure ()
       Left err -> fail ("seed transfer " <> T.unpack (seedKey t) <> " was rejected: " <> show err)
 
--- | (id, display name) for every demo customer account.
-demoAccounts :: [(Text, Text)]
+-- | The password every demo user gets, unless DEMO_PASSWORD is set when
+-- seeding. For local demos only: it's published in the README.
+defaultDemoPassword :: Text
+defaultDemoPassword = "ledger-demo-2026"
+
+-- | (username, role) for every demo user: alice runs Acme, bob runs Globex,
+-- and admin can see everything and make deposits.
+demoUsers :: [(Text, Role)]
+demoUsers =
+  [ ("alice", RoleCustomer)
+  , ("bob", RoleCustomer)
+  , ("admin", RoleAdmin)
+  ]
+
+-- | (id, display name, owner) for every demo customer account.
+demoAccounts :: [(Text, Text, Text)]
 demoAccounts =
-  [ ("acme-ops", "Acme Operating")
-  , ("acme-payroll", "Acme Payroll")
-  , ("acme-tax", "Acme Tax Reserve")
-  , ("acme-savings", "Acme Savings")
-  , ("globex-ops", "Globex Operating")
-  , ("globex-payroll", "Globex Payroll")
+  [ ("acme-ops", "Acme Operating", "alice")
+  , ("acme-payroll", "Acme Payroll", "alice")
+  , ("acme-tax", "Acme Tax Reserve", "alice")
+  , ("acme-savings", "Acme Savings", "alice")
+  , ("globex-ops", "Globex Operating", "bob")
+  , ("globex-payroll", "Globex Payroll", "bob")
   ]
 
 -- | Three months of activity for two companies, oldest first.

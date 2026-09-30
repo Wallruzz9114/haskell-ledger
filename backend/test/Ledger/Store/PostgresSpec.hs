@@ -13,9 +13,12 @@ import Data.List (isSuffixOf)
 import Data.Pool (Pool, withResource)
 import Database.PostgreSQL.Simple (Connection, Only (..), execute_, query_)
 import Ledger.Db (newDbPool, runMigrations)
-import Ledger.Store (LedgerStore)
-import Ledger.Store.Postgres (newPostgresStore)
+import Control.Monad (void)
+import Ledger.Store (LedgerStore, UserStore (..))
+import Ledger.Types (Role (..), User (..), Username)
+import Ledger.Store.Postgres (newPostgresStore, newPostgresUserStore)
 import Support.StoreContract (storeContract)
+import Support.UserStoreContract (userStoreContract)
 import System.Environment (lookupEnv)
 import Test.Hspec
 
@@ -27,7 +30,9 @@ spec = do
   -- "traverse" runs the setup only if the Maybe is a Just.
   mPool <- runIO (lookupEnv "TEST_DATABASE_URL" >>= traverse connect)
   case mPool of
-    Just pool -> storeContract (emptyStore pool)
+    Just pool -> do
+      describe "ledger store" (storeContract (emptyStore pool))
+      describe "user store" (userStoreContract (emptyUserStore pool))
     Nothing ->
       it "runs when TEST_DATABASE_URL is set" $
         pendingWith "start Postgres with docker compose and set TEST_DATABASE_URL (see README)"
@@ -47,9 +52,21 @@ connect url = do
 
 -- | Wipe every table, then hand back a store over the now-empty database.
 -- RESTART IDENTITY resets the id counters, so transfer ids start at 1 again.
-emptyStore :: Pool Connection -> IO LedgerStore
+emptyStore :: Pool Connection -> IO (LedgerStore, Username -> IO ())
 emptyStore pool = do
+  wipe pool
+  -- Accounts can only be owned by users that exist (a foreign key), so the
+  -- contract gets a way to create them.
+  let createUser name = void (storeCreateUser (newPostgresUserStore pool) (User name RoleCustomer) "not-a-real-hash")
+  pure (newPostgresStore pool, createUser)
+
+emptyUserStore :: Pool Connection -> IO UserStore
+emptyUserStore pool = newPostgresUserStore pool <$ wipe pool
+
+-- | "<$" runs the action on the right, then returns the value on the left.
+wipe :: Pool Connection -> IO ()
+wipe pool = do
   _ <-
     withResource pool $ \conn ->
-      execute_ conn "TRUNCATE accounts, transfers, entries, idempotency_keys RESTART IDENTITY CASCADE"
-  pure (newPostgresStore pool)
+      execute_ conn "TRUNCATE accounts, transfers, entries, idempotency_keys, sessions, users RESTART IDENTITY CASCADE"
+  pure ()

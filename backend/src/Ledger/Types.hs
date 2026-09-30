@@ -22,6 +22,9 @@ module Ledger.Types
   , TransferRequest (..)
   , TransferError (..)
   , OpenAccountError (..)
+  , Username (..)
+  , Role (..)
+  , User (..)
   ) where
 
 -- "ToJSON (..)" imports the class AND its methods (we need its toJSON method
@@ -82,6 +85,9 @@ data Account = Account
   { accountId :: AccountId
   , accountName :: Text
   , accountKind :: AccountKind
+  , -- Who owns it. Nothing for system accounts like "external", which
+    -- nobody may send money from (see Ledger.Auth).
+    accountOwner :: Maybe Username
   }
   deriving (Eq, Show, Generic)
 
@@ -221,3 +227,29 @@ stripPrefix n = defaultOptions {fieldLabelModifier = lowerFirst . drop n}
     -- -Wall warns if you leave out a case, e.g. forget the [] line.
     lowerFirst (c : cs) = toLower c : cs
     lowerFirst [] = []
+
+-- Users ------------------------------------------------------------------------
+
+-- | A login name, e.g. "alice". A newtype, like AccountId, so a username
+-- can't be passed where an account id is expected.
+newtype Username = Username Text
+  deriving (Eq, Ord, Show, Generic)
+
+instance ToJSON Username
+
+instance FromJSON Username
+
+-- | What a user is allowed to do (see Ledger.Auth for the actual rules).
+-- Not called Customer / Admin: "Customer" is already taken by AccountKind,
+-- and two constructors in one module can't share a name.
+data Role = RoleCustomer | RoleAdmin
+  deriving (Eq, Show)
+
+-- | Someone who can log in. The password hash is deliberately NOT part of
+-- this type, so it can't end up in a JSON response or a log line by
+-- accident; the stores keep it separately.
+data User = User
+  { userName :: Username
+  , userRole :: Role
+  }
+  deriving (Eq, Show)

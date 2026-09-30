@@ -20,12 +20,14 @@ import Ledger.Types
 import Support.Fixtures
 import Test.Hspec
 
--- | Every store test, given a way to make an EMPTY store.
+-- | Every store test, given a way to make an EMPTY store, paired with a way
+-- to create a user (accounts can only be owned by users that exist, which
+-- Postgres enforces with a foreign key).
 --
 -- Taking the store-maker as an argument is what lets one set of tests run
 -- against both implementations: this function doesn't know which it has.
-storeContract :: IO LedgerStore -> Spec
-storeContract emptyStore = do
+storeContract :: IO (LedgerStore, Username -> IO ()) -> Spec
+storeContract emptyStoreAndUsers = do
   it "replays an idempotent request instead of applying it twice" $ do
     store <- seeded
     let key = Just (IdempotencyKey "payroll-2026-09")
@@ -61,13 +63,28 @@ storeContract emptyStore = do
     storeGetAccount store (AccountId "nobody") `shouldReturn` Nothing
     storeEntries store (AccountId "nobody") `shouldReturn` Nothing
     storeEntries store carol `shouldReturn` Just []
-    storeOpenAccount store alice "again" Customer `shouldReturn` Left (AccountAlreadyExists alice)
+    storeOpenAccount store alice "again" Customer Nothing `shouldReturn` Left (AccountAlreadyExists alice)
 
   it "lists accounts in id order with their balances" $ do
     store <- seeded
     -- "first f" applies f to the first half of a pair: (a, b) -> (f a, b).
     map (first accountId) <$> storeListAccounts store
       `shouldReturn` [(alice, 1000), (bob, 0), (carol, 0), (external, -1000)]
+
+  it "gives a customer account an owner, and lists accounts by owner" $ do
+    (store, createUser) <- seededWithUsers
+    createUser (Username "alice")
+    storeSetAccountOwner store alice (Username "alice") `shouldReturn` True
+    map (accountId . fst) <$> storeListAccountsOwnedBy store (Username "alice") `shouldReturn` [alice]
+    map (accountId . fst) <$> storeListAccountsOwnedBy store (Username "bob") `shouldReturn` []
+    fmap (accountOwner . fst) <$> storeGetAccount store alice `shouldReturn` Just (Just (Username "alice"))
+
+  it "refuses to give a system account or a missing account an owner" $ do
+    (store, createUser) <- seededWithUsers
+    createUser (Username "alice")
+    storeSetAccountOwner store external (Username "alice") `shouldReturn` False
+    storeSetAccountOwner store (AccountId "nobody") (Username "alice") `shouldReturn` False
+    fmap (accountOwner . fst) <$> storeGetAccount store external `shouldReturn` Just Nothing
 
   it "never overdraws under concurrent transfers" $ do
     store <- seeded
@@ -95,12 +112,13 @@ storeContract emptyStore = do
   where
     -- A fresh store per test: external, three customers, and 1000 cents
     -- deposited into alice. Each test gets its own, so they can't interfere.
-    seeded = do
-      store <- emptyStore
+    seeded = fst <$> seededWithUsers
+    seededWithUsers = do
+      (store, createUser) <- emptyStoreAndUsers
       -- mapM_ runs an action for each list element and discards the results
       -- (like forEach with an async callback).
       mapM_
-        (\(aid, kind) -> storeOpenAccount store aid (T.pack (show aid)) kind)
+        (\(aid, kind) -> storeOpenAccount store aid (T.pack (show aid)) kind Nothing)
         ((external, External) : [(c, Customer) | c <- customers])
       _ <- storeTransfer store Nothing (transfer external alice 1000)
-      pure store
+      pure (store, createUser)

@@ -25,6 +25,7 @@ common shared
     , mtl
     , stm
     , text
+    , time
 
 -- The library: all the real code, in src/. The executable and the tests
 -- below both depend on it, so the logic is written once and shared.
@@ -34,17 +35,27 @@ library
   -- Every module must be listed here, or cabal silently won't compile it.
   exposed-modules:
       Ledger.App
+      Ledger.Auth
       Ledger.Core
       Ledger.Db
       Ledger.Money
       Ledger.Seed
+      Ledger.Session
       Ledger.Store
       Ledger.Store.Postgres
+      Ledger.Throttle
       Ledger.Types
       Ledger.Validate
   build-depends:
-      file-embed
+      -- Reading and writing the session cookie.
+      cookie
+      -- Secure random tokens and SHA-256 (crypton), and its byte helpers (ram).
+    , crypton
+    , file-embed
     , http-types
+    -- Network addresses, for counting failed logins per client.
+    , network
+    , ram
     -- The Postgres driver (needs libpq, Postgres's C client library) and a
     -- connection pool.
     , postgresql-simple >=0.6 && <0.8
@@ -62,9 +73,11 @@ executable ledger-api
   import:           shared
   hs-source-dirs:   app
   main-is:          Main.hs
-  -- -threaded uses the multi-core runtime, so the web server can handle
-  -- requests in parallel.
-  ghc-options:      -threaded -rtsopts
+  -- -threaded uses the multi-core runtime, and -N runs it on every CPU
+  -- core, so the web server handles requests in parallel. Without -N it
+  -- runs on one core, and each ~50 ms password check would pause every
+  -- other request.
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       double-entry-ledger
     , warp
@@ -89,17 +102,22 @@ test-suite spec
   -- Every test module must be listed, like exposed-modules for the library.
   other-modules:
       Ledger.AppSpec
+      Ledger.AuthSpec
       Ledger.CoreSpec
       Ledger.InvariantsSpec
       Ledger.MigrationsSpec
       Ledger.MoneySpec
       Ledger.SeedSpec
+      Ledger.SessionSpec
       Ledger.Store.PostgresSpec
       Ledger.StoreSpec
+      Ledger.ThrottleSpec
+      Ledger.UserStoreSpec
       Ledger.ValidateSpec
       Support.Fixtures
       Support.Generators
       Support.StoreContract
+      Support.UserStoreContract
   -- -N runs on all CPU cores, which the concurrency tests rely on.
   ghc-options:      -threaded -rtsopts -with-rtsopts=-N
   -- A program (not a library) needed while building: the tool that
@@ -117,5 +135,6 @@ test-suite spec
     , postgresql-simple
     , QuickCheck
     , resource-pool
+    , time
     , wai
     , wai-extra

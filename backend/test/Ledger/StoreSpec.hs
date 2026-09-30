@@ -6,4 +6,10 @@ import Support.StoreContract (storeContract)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "in-memory store" (storeContract newInMemoryStore)
+spec = describe "in-memory store" (storeContract emptyStore)
+  where
+    -- The in-memory store doesn't check that owners exist, so there's
+    -- nothing to do to "create" a user.
+    emptyStore = do
+      store <- newInMemoryStore
+      pure (store, \_ -> pure ())

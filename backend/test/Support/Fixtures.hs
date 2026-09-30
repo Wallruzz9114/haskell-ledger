@@ -56,4 +56,4 @@ freshLedger = foldl open emptyLedger accounts
     -- either f g e: if e is Left x, call f x; if Right y, call g y.
     -- Here: crash with the error (fine in a test fixture), or keep the new
     -- ledger ("snd" takes the second element of the pair).
-    open l (aid, kind) = either (error . show) snd (openAccount aid "test" kind l)
+    open l (aid, kind) = either (error . show) snd (openAccount aid "test" kind Nothing l)
