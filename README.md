@@ -60,11 +60,11 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 106 examples, 0 failures, 1 pending
+# 109 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 117 examples, 0 failures
+# 121 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
@@ -105,6 +105,7 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 | `src/App.test.tsx` | Logged out shows the login page, logging in shows your accounts, logging out goes back |
 | `src/features/auth/LoginPage.test.tsx` | Wrong-password and lockout messages |
 | `src/features/accounts/AccountsPanel.test.tsx` | Customers vs admins: what each sees |
+| `src/features/accounts/AccountEntries.test.tsx` | Each entry's counterparty ("To"/"From"), memo, date and signed amount |
 | `src/features/transfers/TransferForm.test.tsx` | Only your own accounts to send from; amounts sent in cents; the same `Idempotency-Key` on an unchanged retry but a new one once the details change (so editing a refused transfer isn't a 409); API errors shown |
 | `src/features/transfers/DepositForm.test.tsx` | Deposits: customer accounts only, and the same key rules as transfers |
 
@@ -255,7 +256,7 @@ Open <http://localhost:5173> and log in as one of the demo users:
 - **alice** or **bob** see only their own accounts, can send money from them to any account id (for example alice paying `globex-ops`), and can open new accounts for themselves.
 - **admin** sees every account with its owner, makes deposits, opens accounts for users, and assigns owners. Admins can't send money out of customers' accounts, so there's no transfer form.
 
-Click an account to see its double-entry history. Vite forwards `/api` requests to the Haskell server, so the browser only ever talks to one origin: the session cookie just works, and there's no CORS to set up.
+Click an account to see its double-entry history: when each transfer happened, who was on the other side, the memo, and the amount. Vite forwards `/api` requests to the Haskell server, so the browser only ever talks to one origin: the session cookie just works, and there's no CORS to set up.
 
 Front-end commands, from `web/`:
 
@@ -340,12 +341,27 @@ Every endpoint except `/api/health` and `/api/login` needs a logged-in session (
 | `GET` | `/api/accounts` | logged in | Accounts you can see, with balances: your own, or all of them for an admin | 200 |
 | `POST` | `/api/accounts` | logged in | Open an account: `{ "id", "name", "owner"? }`. `owner` defaults to you; only an admin may name someone else. | 201 |
 | `GET` | `/api/accounts/:id` | owner or admin | One account with its balance | 200 |
-| `GET` | `/api/accounts/:id/entries` | owner or admin | An account's ledger entries, newest first | 200 |
+| `GET` | `/api/accounts/:id/entries` | owner or admin | An account's ledger entries, newest first (see below) | 200 |
 | `PUT` | `/api/accounts/:id/owner` | admin | Give a customer account an owner: `{ "owner" }` | 200 |
 | `POST` | `/api/deposits` | admin | Deposit from outside: `{ "to", "amountCents" }` | 201 |
 | `POST` | `/api/transfers` | owner of `from` | Transfer: `{ "from", "to", "amountCents", "memo"? }`, optional `Idempotency-Key` header. `to` can be anyone's account. | 201 |
 
 Request bodies must be sent with `Content-Type: application/json`.
+
+Each entry is one side of a transfer, seen from that account:
+
+```json
+{
+  "transfer": 40,
+  "account": "acme-ops",
+  "amount": -1234,
+  "counterparty": "globex-ops",
+  "memo": "Coffee beans for the office",
+  "createdAt": "2026-09-29T19:14:03.512Z"
+}
+```
+
+`amount` is negative when money left the account. `counterparty` is the account on the other side, and `createdAt` is when the transfer happened, in UTC. Transfers returned by `POST /api/transfers` and `/api/deposits` also include `createdAt`.
 
 An account you can't see answers 404, exactly like one that doesn't exist, so reading an account never reveals that someone else has it.
 

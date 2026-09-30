@@ -14,9 +14,11 @@ module Support.Fixtures
   , amount
   , transfer
   , freshLedger
+  , testTime
   ) where
 
 import Data.Maybe (fromJust)
+import Data.Time (UTCTime (..), fromGregorian)
 import Ledger.Core
 import Ledger.Money
 import Ledger.Types
@@ -57,3 +59,8 @@ freshLedger = foldl open emptyLedger accounts
     -- Here: crash with the error (fine in a test fixture), or keep the new
     -- ledger ("snd" takes the second element of the pair).
     open l (aid, kind) = either (error . show) snd (openAccount aid "test" kind Nothing l)
+
+-- | A fixed moment for pure tests. Ledger.Core takes the time as an
+-- argument (it never reads the clock), so tests can choose it.
+testTime :: UTCTime
+testTime = UTCTime (fromGregorian 2026 9 29) 43200 -- noon

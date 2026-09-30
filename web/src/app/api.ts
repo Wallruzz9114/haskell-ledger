@@ -23,10 +23,17 @@ export interface Account {
   balanceCents: number
 }
 
+/** One side of a transfer, as seen from one account. */
 export interface Entry {
   transfer: number
   account: string
+  /** Negative when money left this account, positive when it arrived. */
   amount: number
+  /** The account on the other side: who paid this account, or who it paid. */
+  counterparty: string
+  memo: string
+  /** ISO 8601 timestamp in UTC, e.g. "2026-09-29T18:05:12.345Z". */
+  createdAt: string
 }
 
 export interface Transfer {
@@ -35,6 +42,7 @@ export interface Transfer {
   to: string
   amount: number
   memo: string
+  createdAt: string
 }
 
 /** Every error from the Haskell API has this shape, e.g. insufficient_funds. */

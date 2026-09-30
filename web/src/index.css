@@ -286,3 +286,24 @@ th {
 .right {
   text-align: right;
 }
+
+/* Entries: date and transfer number stacked, then details, then amount. */
+.entries td {
+  vertical-align: top;
+}
+
+.cell-stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.entries .when {
+  white-space: nowrap;
+  font-size: 0.9rem;
+  width: 1%; /* as narrow as its content allows */
+  padding-right: 16px;
+}
+
+.entries .memo {
+  overflow-wrap: anywhere;
+}

@@ -34,6 +34,7 @@ import Data.Char (toLower)
 -- Text is the string type real Haskell code uses. The built-in String is a
 -- linked list of characters, which is slow; Text is a packed, efficient string.
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import GHC.Generics (Generic)
 -- Our own module from Money.hs. Note we get Amount but not its constructor:
 -- Money.hs didn't export it, so the only way to make one is mkAmount.
@@ -113,20 +114,30 @@ newtype IdempotencyKey = IdempotencyKey Text
 -- | Double-entry bookkeeping: every transfer writes two entries whose
 -- amounts sum to zero. A balance is just the sum of an account's entries.
 --
--- Example: moving 500 cents from alice to bob writes
---   Entry (TransferId 1) (AccountId "alice") (Cents (-500))
---   Entry (TransferId 1) (AccountId "bob")   (Cents 500)
+-- Example: moving 500 cents from alice to bob with the memo "rent" writes
+--   alice's side: transfer 1, amount -500, counterparty bob,   memo "rent"
+--   bob's side:   transfer 1, amount +500, counterparty alice, memo "rent"
+-- (both with the same time).
 data Entry = Entry
   { entryTransfer :: TransferId
   , entryAccount :: AccountId
   , entryAmount :: Cents
+  , -- | The account on the other side of the transfer: who paid this
+    -- account, or who it paid.
+    entryCounterparty :: AccountId
+  , -- | The transfer's memo, e.g. "September payroll".
+    entryMemo :: Text
+  , -- | When the transfer happened. UTCTime is a moment in time, always in
+    -- UTC (no time zones); the front end shows it in the viewer's zone.
+    entryCreatedAt :: UTCTime
   }
   deriving (Eq, Show, Generic)
 
 -- Here we DO write the instance body, to customise the JSON field names.
 -- genericToJSON still builds the encoder from Generic, but with options:
 -- stripPrefix 5 drops "entry" (5 letters), so the JSON is
---   {"transfer": 1, "account": "alice", "amount": -500}
+--   {"transfer": 1, "account": "alice", "amount": -500,
+--    "counterparty": "bob", "memo": "rent", "createdAt": "2026-09-29T..."}
 -- instead of {"entryTransfer": 1, ...}.
 instance ToJSON Entry where
   toJSON = genericToJSON (stripPrefix 5)
@@ -141,6 +152,7 @@ data Transfer = Transfer
   , transferTo :: AccountId
   , transferAmount :: Cents
   , transferMemo :: Text
+  , transferCreatedAt :: UTCTime
   }
   deriving (Eq, Show, Generic)
 

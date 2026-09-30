@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | HTTP-level tests for Ledger.App: logging in, who may do what, and every
@@ -75,6 +76,25 @@ spec = do
       getAs cookie "/api/accounts/globex-ops" `shouldRespondWith` errorCode 404 "unknown_account"
       getAs cookie "/api/accounts/globex-ops/entries" `shouldRespondWith` errorCode 404 "unknown_account"
       getAs cookie "/api/accounts/acme-ops/entries" `shouldRespondWith` 200
+
+  describe "entries" $ with demoApp $
+    it "show the counterparty, memo and time of each transfer" $ do
+      cookie <- loginAs "alice"
+      _ <- postAs cookie "/api/transfers" (encode (object ["from" .= ("acme-ops" :: Text), "to" .= ("globex-ops" :: Text), "amountCents" .= (2500 :: Int), "memo" .= ("Invoice GX-1080" :: Text)]))
+      response <- getAs cookie "/api/accounts/acme-ops/entries"
+      liftIO $ do
+        newest <- case decode (simpleBody response) :: Maybe [Map.Map Text Value] of
+          Just (entry : _) -> pure entry
+          _ -> fail ("no entries in " <> show (simpleBody response))
+        Map.lookup "counterparty" newest `shouldBe` Just (String "globex-ops")
+        Map.lookup "memo" newest `shouldBe` Just (String "Invoice GX-1080")
+        Map.lookup "amount" newest `shouldBe` Just (Number (-2500))
+        -- A timestamp like "2026-09-29T18:05:12.345Z". "\case" (from the
+        -- LambdaCase extension) is a lambda that pattern-matches its one
+        -- argument straight away: shorthand for \x -> case x of ...
+        Map.lookup "createdAt" newest `shouldSatisfy` \case
+          Just (String t) -> "T" `T.isInfixOf` t
+          _ -> False
 
   describe "who may move money" $ with demoApp $ do
     it "lets an owner send from their account to anyone's" $ do
