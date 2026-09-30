@@ -468,7 +468,7 @@ haskell-ledger/
     src/app/                 # API client (RTK Query), Redux store, money helpers
     src/features/            # auth, accounts and transfers components, each with its tests
     src/index.css            # styles
-  .github/workflows/ci.yml   # CI (later step)
+  .github/workflows/ci.yml   # CI: build, lint and test both halves on every PR
 ```
 
 Because `cabal.project` sits at the root, `cabal build all` works from either the root or `backend/`.
