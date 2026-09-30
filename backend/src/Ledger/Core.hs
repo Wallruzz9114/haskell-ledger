@@ -36,6 +36,7 @@ import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Data.Time (UTCTime)
 import Ledger.Money (Cents (..), unAmount)
 -- No list in parentheses: import everything Ledger.Types exports.
 import Ledger.Types
@@ -191,8 +192,12 @@ checkTransfer req mFrom mTo fromBalance = do
 
 -- | Validate and apply a transfer. Either the whole thing happens (two
 -- entries, both balances updated) or nothing does.
-applyTransfer :: TransferRequest -> Ledger -> Either TransferError (Transfer, Ledger)
-applyTransfer req ledger = do
+--
+-- The time comes in as an argument instead of being read from the clock:
+-- reading the clock is IO, and this module stays pure. The caller (the
+-- store) reads the clock; tests can pass any fixed time they like.
+applyTransfer :: UTCTime -> TransferRequest -> Ledger -> Either TransferError (Transfer, Ledger)
+applyTransfer now req ledger = do
   -- Run the rules. A Left here stops the whole do block with that error.
   checkTransfer
     req
@@ -203,10 +208,11 @@ applyTransfer req ledger = do
   -- ledger' (read "ledger prime") is a brand-new ledger value.
   let amount = unAmount (reqAmount req)
       tid = TransferId (ledgerNextTransferId ledger)
-      transfer = Transfer tid (reqFrom req) (reqTo req) amount (reqMemo req)
+      transfer = Transfer tid (reqFrom req) (reqTo req) amount (reqMemo req) now
       -- The two sides of double-entry: they always sum to zero.
-      debit = Entry tid (reqFrom req) (negate amount)
-      credit = Entry tid (reqTo req) amount
+      -- Each side records the OTHER account as its counterparty.
+      debit = Entry tid (reqFrom req) (negate amount) (reqTo req) (reqMemo req) now
+      credit = Entry tid (reqTo req) amount (reqFrom req) (reqMemo req) now
       ledger' =
         ledger
           { -- "f $ x" means "f (x)": it saves a pair of parentheses.

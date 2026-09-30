@@ -118,41 +118,45 @@ newInMemoryStore = do
             Just ledger' -> writeTVar ledgerVar ledger' >> pure True
             Nothing -> pure False
       , storeEntries = \aid -> entriesFor aid <$> readTVarIO ledgerVar
-      , storeTransfer = \mkey req -> atomically $ do
-          -- Everything in this block is one transaction: the idempotency
-          -- check, the balance check and the write. Two concurrent requests
-          -- can't both see "1000 available" and both spend it: STM detects
-          -- the conflict and re-runs one of them against the new state.
-          keys <- readTVar keysVar
-          -- ">>=" chains Maybe steps: if there's no key, the result is
-          -- Nothing; otherwise look the key up in the map.
-          -- "(`Map.lookup` keys)" is a section: \k -> Map.lookup k keys.
-          case mkey >>= (`Map.lookup` keys) of
-            -- Seen this key before: replay the original outcome if it's the
-            -- same request, otherwise refuse.
-            -- Guards work inside case alternatives too.
-            Just (Remembered original result)
-              | original == req -> pure result
-              | otherwise -> pure (Left IdempotencyKeyReused)
-            -- New key (or no key at all): actually run the transfer.
-            Nothing -> do
-              ledger <- readTVar ledgerVar
-              let result = applyTransfer req ledger
-                  -- "fst" takes the first element of a pair. "fst <$> result"
-                  -- keeps the Transfer and drops the new ledger, but only if
-                  -- result is a Right; a Left error passes through unchanged.
-                  outcome = fst <$> result
-              -- Only save the new ledger if the transfer succeeded.
-              case result of
-                Right (_, ledger') -> writeTVar ledgerVar ledger'
-                Left _ -> pure ()
-              -- Remember the outcome under the key (success OR failure),
-              -- so a retry gets exactly the same answer.
-              -- modifyTVar' applies a function to a TVar's contents.
-              case mkey of
-                Just key -> modifyTVar' keysVar (Map.insert key (Remembered req outcome))
-                Nothing -> pure ()
-              pure outcome
+      , storeTransfer = \mkey req -> do
+          -- Read the clock first: STM transactions can't do IO, since STM
+          -- may re-run them.
+          now <- getCurrentTime
+          atomically $ do
+            -- Everything in this block is one transaction: the idempotency
+            -- check, the balance check and the write. Two concurrent requests
+            -- can't both see "1000 available" and both spend it: STM detects
+            -- the conflict and re-runs one of them against the new state.
+            keys <- readTVar keysVar
+            -- ">>=" chains Maybe steps: if there's no key, the result is
+            -- Nothing; otherwise look the key up in the map.
+            -- "(`Map.lookup` keys)" is a section: \k -> Map.lookup k keys.
+            case mkey >>= (`Map.lookup` keys) of
+              -- Seen this key before: replay the original outcome if it's the
+              -- same request, otherwise refuse.
+              -- Guards work inside case alternatives too.
+              Just (Remembered original result)
+                | original == req -> pure result
+                | otherwise -> pure (Left IdempotencyKeyReused)
+              -- New key (or no key at all): actually run the transfer.
+              Nothing -> do
+                ledger <- readTVar ledgerVar
+                let result = applyTransfer now req ledger
+                    -- "fst" takes the first element of a pair. "fst <$> result"
+                    -- keeps the Transfer and drops the new ledger, but only if
+                    -- result is a Right; a Left error passes through unchanged.
+                    outcome = fst <$> result
+                -- Only save the new ledger if the transfer succeeded.
+                case result of
+                  Right (_, ledger') -> writeTVar ledgerVar ledger'
+                  Left _ -> pure ()
+                -- Remember the outcome under the key (success OR failure),
+                -- so a retry gets exactly the same answer.
+                -- modifyTVar' applies a function to a TVar's contents.
+                case mkey of
+                  Just key -> modifyTVar' keysVar (Map.insert key (Remembered req outcome))
+                  Nothing -> pure ()
+                pure outcome
       }
 
 -- Users and sessions ---------------------------------------------------------------

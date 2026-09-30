@@ -46,4 +46,4 @@ runOps = scanl step freshLedger
   where
     -- A rejected transfer (Left) leaves the ledger unchanged ("const l"
     -- ignores the error and returns l); an accepted one gives the new ledger.
-    step l req = either (const l) snd (applyTransfer req l)
+    step l req = either (const l) snd (applyTransfer testTime req l)

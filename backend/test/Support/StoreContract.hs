@@ -13,6 +13,7 @@ module Support.StoreContract
 import Control.Concurrent.Async (forConcurrently, replicateConcurrently)
 import Data.Bifunctor (first)
 import Data.Either (isRight)
+import Data.Time (addUTCTime, getCurrentTime)
 import qualified Data.Text as T
 import Ledger.Money
 import Ledger.Store
@@ -64,6 +65,22 @@ storeContract emptyStoreAndUsers = do
     storeEntries store (AccountId "nobody") `shouldReturn` Nothing
     storeEntries store carol `shouldReturn` Just []
     storeOpenAccount store alice "again" Customer Nothing `shouldReturn` Left (AccountAlreadyExists alice)
+
+  it "gives each entry its counterparty, memo and time, newest first" $ do
+    store <- seeded
+    startedAt <- getCurrentTime
+    _ <- storeTransfer store Nothing ((transfer alice bob 300) {reqMemo = "rent"})
+    finishedAt <- getCurrentTime
+    Just aliceEntries <- storeEntries store alice
+    Just bobEntries <- storeEntries store bob
+    -- alice: the rent payment (newest), then the seeded deposit.
+    map (\e -> (entryAmount e, entryCounterparty e, entryMemo e)) aliceEntries
+      `shouldBe` [(-300, bob, "rent"), (1000, external, "")]
+    map (\e -> (entryAmount e, entryCounterparty e)) bobEntries `shouldBe` [(300, alice)]
+    -- The time is the moment of the transfer (Postgres may round it to
+    -- microseconds, hence the one-second allowance).
+    map entryCreatedAt bobEntries
+      `shouldSatisfy` all (\t -> t >= addUTCTime (-1) startedAt && t <= addUTCTime 1 finishedAt)
 
   it "lists accounts in id order with their balances" $ do
     store <- seeded

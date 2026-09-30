@@ -31,22 +31,30 @@ spec = do
     -- "fst <$> result" keeps just the Transfer (or the error), dropping the
     -- new ledger, so we can compare it with an expected value.
     it "refuses to overdraw a customer account" $
-      fst <$> applyTransfer (transfer alice bob 100) freshLedger
+      fst <$> applyTransfer testTime (transfer alice bob 100) freshLedger
         `shouldBe` Left (InsufficientFunds (Cents 0) (Cents 100))
     it "refuses a transfer to the same account" $
-      fst <$> applyTransfer (transfer external external 1) freshLedger `shouldBe` Left SameAccount
+      fst <$> applyTransfer testTime (transfer external external 1) freshLedger `shouldBe` Left SameAccount
     it "refuses unknown accounts" $
-      fst <$> applyTransfer (transfer alice (AccountId "nobody") 1) freshLedger
+      fst <$> applyTransfer testTime (transfer alice (AccountId "nobody") 1) freshLedger
         `shouldBe` Left (UnknownAccount (AccountId "nobody"))
     it "moves money and writes two balancing entries" $ do
       let ok = either (error . show) snd
-          l1 = ok (applyTransfer (transfer external alice 500) freshLedger)
-          l2 = ok (applyTransfer (transfer alice bob 200) l1)
+          l1 = ok (applyTransfer testTime (transfer external alice 500) freshLedger)
+          l2 = ok (applyTransfer testTime (transfer alice bob 200) l1)
       -- Plain numbers like 300 work as Cents because Cents derives Num.
       balanceOf alice l2 `shouldBe` Just 300
       balanceOf bob l2 `shouldBe` Just 200
       -- alice's entries (+500, -200) add up to her balance.
       sum . map entryAmount <$> entriesFor alice l2 `shouldBe` Just 300
+
+    it "records each side's counterparty, the memo and the time" $ do
+      let request = (transfer external alice 500) {reqMemo = "rent"}
+          l1 = either (error . show) snd (applyTransfer testTime request freshLedger)
+          sideOf aid = map (\e -> (entryCounterparty e, entryMemo e, entryCreatedAt e)) <$> entriesFor aid l1
+      -- Each side names the OTHER account.
+      sideOf alice `shouldBe` Just [(external, "rent", testTime)]
+      sideOf external `shouldBe` Just [(alice, "rent", testTime)]
 
   describe "openAccount" $
     it "refuses an id that's already taken" $

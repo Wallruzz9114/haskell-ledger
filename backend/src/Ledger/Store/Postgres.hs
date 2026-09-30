@@ -77,12 +77,24 @@ newPostgresStore pool =
         if null exists
           then pure Nothing
           else do
+            -- Each entry, joined with its transfer for the memo and time.
+            -- The counterparty is whichever end of the transfer ISN'T this
+            -- account: CASE is SQL's if/else.
             rows <-
               query
                 conn
-                "SELECT transfer_id, account_id, amount FROM entries WHERE account_id = ? ORDER BY id DESC"
+                "SELECT e.transfer_id, e.account_id, e.amount, \
+                \CASE WHEN t.from_account = e.account_id THEN t.to_account ELSE t.from_account END, \
+                \t.memo, t.created_at \
+                \FROM entries e JOIN transfers t ON t.id = e.transfer_id \
+                \WHERE e.account_id = ? ORDER BY e.id DESC"
                 (Only (accountIdText aid))
-            pure (Just [Entry (TransferId t) (AccountId a) (Cents n) | (t, a, n) <- rows])
+            pure
+              ( Just
+                  [ Entry (TransferId t) (AccountId a) (Cents n) (AccountId other) memo at
+                  | (t, a, n, other, memo, at) <- rows
+                  ]
+              )
     , storeTransfer = \mkey req -> withConn $ \conn ->
         -- One transaction for everything: the idempotency check, the rules,
         -- the writes, and remembering the outcome. All of it commits, or
@@ -182,11 +194,13 @@ transferIn conn req = do
       let amount = amountOf req
           from = accountIdText (reqFrom req)
           to = accountIdText (reqTo req)
-      -- RETURNING hands back the id Postgres generated for the new row.
-      [Only tid] <-
+      -- RETURNING hands back values Postgres generated for the new row: the
+      -- id, and the created_at time (so the response shows the same time
+      -- the database stored).
+      [(tid, createdAt)] <-
         query
           conn
-          "INSERT INTO transfers (from_account, to_account, amount, memo) VALUES (?, ?, ?, ?) RETURNING id"
+          "INSERT INTO transfers (from_account, to_account, amount, memo) VALUES (?, ?, ?, ?) RETURNING id, created_at"
           (from, to, amount, reqMemo req)
       -- executeMany runs one INSERT for each tuple in the list.
       _ <-
@@ -196,7 +210,7 @@ transferIn conn req = do
           [(tid, from, negate amount), (tid, to, amount)]
       _ <- execute conn "UPDATE accounts SET balance = balance - ? WHERE id = ?" (amount, from)
       _ <- execute conn "UPDATE accounts SET balance = balance + ? WHERE id = ?" (amount, to)
-      pure (Right (Transfer (TransferId tid) (reqFrom req) (reqTo req) (Cents amount) (reqMemo req)))
+      pure (Right (Transfer (TransferId tid) (reqFrom req) (reqTo req) (Cents amount) (reqMemo req) createdAt))
 
 -- | The key was used before: answer with the remembered outcome if this is
 -- the same request, or refuse if it's a different one.
@@ -228,9 +242,9 @@ replay conn key req = do
 
 loadTransfer :: Connection -> Integer -> IO Transfer
 loadTransfer conn tid = do
-  [(from, to, amount, memo)] <-
-    query conn "SELECT from_account, to_account, amount, memo FROM transfers WHERE id = ?" (Only tid)
-  pure (Transfer (TransferId tid) (AccountId from) (AccountId to) (Cents amount) memo)
+  [(from, to, amount, memo, createdAt)] <-
+    query conn "SELECT from_account, to_account, amount, memo, created_at FROM transfers WHERE id = ?" (Only tid)
+  pure (Transfer (TransferId tid) (AccountId from) (AccountId to) (Cents amount) memo createdAt)
 
 -- Converting between Haskell values and database columns --------------------
 
