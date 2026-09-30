@@ -56,14 +56,15 @@ jobs:
 
       # Compiling every dependency takes a long time, so keep the compiled
       # packages between runs. The cache is rebuilt only when the cabal
-      # file or cabal.project changes.
+      # file, cabal.project or the pinned versions (cabal.project.freeze)
+      # change.
       - name: Cache dependencies
         uses: actions/cache@v4
         with:
           path: |
             ${{ steps.setup.outputs.cabal-store }}
             dist-newstyle
-          key: ${{ runner.os }}-ghc-9.4.8-${{ hashFiles('cabal.project', 'backend/*.cabal') }}
+          key: ${{ runner.os }}-ghc-9.4.8-${{ hashFiles('cabal.project', 'cabal.project.freeze', 'backend/*.cabal') }}
           restore-keys: |
             ${{ runner.os }}-ghc-9.4.8-
 
@@ -112,3 +113,30 @@ jobs:
       - run: npm run format:check
       - run: npm test
       - run: npm run build
+
+  images:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Buildx is Docker's builder; it can keep layers in GitHub's cache, so
+      # the slow Haskell dependency layer is only rebuilt when it changes.
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build the API image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: false
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+      - name: Build the web image
+        uses: docker/build-push-action@v7
+        with:
+          context: web
+          push: false
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
