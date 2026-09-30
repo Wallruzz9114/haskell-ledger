@@ -25,7 +25,7 @@ import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, asks, runReaderT)
 import Control.Monad.Trans.Class (lift)
-import Data.Aeson (FromJSON (..), Value, eitherDecode, encode, object, withObject, (.:), (.:?), (.=))
+import Data.Aeson (FromJSON (..), eitherDecode, encode, object, (.=))
 import qualified Data.ByteString as BS
 import Data.ByteString.Builder (toLazyByteString)
 import Data.Either (fromRight)
@@ -39,6 +39,7 @@ import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import Data.Time (NominalDiffTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Ledger.Api
 import Ledger.Auth
 import Ledger.Money (Amount, Cents (..), formatCents, maxAmount, mkAmount)
 import Ledger.Session
@@ -106,51 +107,12 @@ externalAccountId = AccountId "external"
 
 -- Request bodies ------------------------------------------------------------
 --
--- Each body gets a small type and a hand-written JSON parser. The parsers
--- use the "applicative style":
---   OpenAccountBody <$> o .: "id" <*> o .: "name"
--- reads as: build an OpenAccountBody from the "id" field and the "name"
--- field. If either field is missing or has the wrong type, parsing fails
--- with an error message instead of building a half-filled value.
---   o .: "x"   -> required field x
---   o .:? "x"  -> optional field x (gives a Maybe)
-
--- | { "username": "alice", "password": "..." }
-data LoginBody = LoginBody Text Text
-
-instance FromJSON LoginBody where
-  -- withObject checks the JSON is an object {...}, then gives us "o" to read
-  -- fields from. "\o -> ..." is a lambda: (o) => ...
-  parseJSON = withObject "LoginBody" $ \o ->
-    LoginBody <$> o .: "username" <*> o .: "password"
-
--- | { "owner": "bob" }
-newtype SetOwnerBody = SetOwnerBody Text
-
-instance FromJSON SetOwnerBody where
-  parseJSON = withObject "SetOwnerBody" $ \o -> SetOwnerBody <$> o .: "owner"
-
--- | { "id": "acme-ops", "name": "Acme Operating", "owner": "alice" }
--- "owner" is optional: it defaults to whoever is logged in.
-data OpenAccountBody = OpenAccountBody Text Text (Maybe Text)
-
-instance FromJSON OpenAccountBody where
-  parseJSON = withObject "OpenAccountBody" $ \o ->
-    OpenAccountBody <$> o .: "id" <*> o .: "name" <*> o .:? "owner"
-
--- | { "from": "acme-ops", "to": "acme-payroll", "amountCents": 1500, "memo": "..." }
-data TransferBody = TransferBody Text Text Integer (Maybe Text)
-
-instance FromJSON TransferBody where
-  parseJSON = withObject "TransferBody" $ \o ->
-    TransferBody <$> o .: "from" <*> o .: "to" <*> o .: "amountCents" <*> o .:? "memo"
-
--- | { "to": "acme-ops", "amountCents": 100000 }
-data DepositBody = DepositBody Text Integer
-
-instance FromJSON DepositBody where
-  parseJSON = withObject "DepositBody" $ \o ->
-    DepositBody <$> o .: "to" <*> o .: "amountCents"
+-- The shape of each request body (LoginRequest, TransferRequestBody...) is
+-- defined in Ledger.Api, which also generates the matching TypeScript types
+-- for the front end. Each handler below parses its body with decodeBody and
+-- takes the fields apart with a record pattern, e.g.
+--   LoginRequest {loginRequestUsername = rawName, ...} <- decodeBody
+-- which names the fields it needs.
 
 -- Application ---------------------------------------------------------------
 
@@ -199,7 +161,7 @@ jsonErrorsFor500 inner httpRequest respond =
 -- Same { "error", "message" } shape as failWith below.
 jsonErrorResponse :: Status -> Text -> Text -> Response
 jsonErrorResponse st code msg =
-  responseLBS st [(hContentType, "application/json")] (encode (object ["error" .= code, "message" .= msg]))
+  responseLBS st [(hContentType, "application/json")] (encode (ErrorBody code msg))
 
 -- | The routing table, like app.get(...) / app.post(...) in Express.
 -- Each route is a "do" block: a sequence of steps that ends in a response.
@@ -213,7 +175,7 @@ routes = do
   -- Logging in and out ----------------------------------------------------
 
   post "/api/login" $ do
-    LoginBody rawName password <- decodeBody
+    LoginRequest {loginRequestUsername = rawName, loginRequestPassword = password} <- decodeBody
     let name = T.toLower (T.strip rawName)
     address <- clientAddress
     guard <- lift (asks envLoginGuard)
@@ -256,7 +218,7 @@ routes = do
         liftIO (storeCreateSession users tokenHash (userName user) (addUTCTime sessionLifetime now))
         secure <- cookieShouldBeSecure
         setHeader "Set-Cookie" (sessionCookie secure token sessionLifetime)
-        json (userJson user)
+        json (userView user)
 
   post "/api/logout" $ do
     users <- lift (asks envUsers)
@@ -268,7 +230,7 @@ routes = do
     setHeader "Set-Cookie" (sessionCookie secure "" 0)
     status status204
 
-  get "/api/me" $ requireUser >>= json . userJson
+  get "/api/me" $ requireUser >>= json . userView
 
   -- Accounts ----------------------------------------------------------------
 
@@ -292,12 +254,12 @@ routes = do
           else storeListAccountsOwnedBy store (userName user)
     -- canView again, as a second line of defence: a list comprehension
     -- with a filter.
-    json [accountJson a b | (a, b) <- ledgerAccounts, canView user a]
+    json [accountView a b | (a, b) <- ledgerAccounts, canView user a]
 
   post "/api/accounts" $ do
     user <- requireUser
     -- Pattern match on the parsed body to name its fields at once.
-    OpenAccountBody rawId rawName rawOwner <- decodeBody
+    OpenAccountRequest {openAccountRequestId = rawId, openAccountRequestName = rawName, openAccountRequestOwner = rawOwner} <- decodeBody
     -- Check the text before it goes anywhere near the store.
     aid <- requireValid "invalid_account_id" (validAccountId rawId)
     name <- requireValid "invalid_account_name" (validAccountName rawName)
@@ -316,13 +278,13 @@ routes = do
     case result of
       Left (AccountAlreadyExists _) -> failWith status409 "account_exists" "An account with that id already exists."
       -- ">>" runs one action, then the next: set status 201, then send JSON.
-      Right account -> status status201 >> json (accountJson account 0)
+      Right account -> status status201 >> json (accountView account 0)
 
   get "/api/accounts/:id" $ do
     user <- requireUser
     -- param "id" reads the ":id" part of the URL.
     (account, bal) <- requireVisibleAccount user =<< param "id"
-    json (accountJson account bal)
+    json (accountView account bal)
 
   -- Give an account an owner. Admins only. Accounts opened before users
   -- existed have no owner, which leaves them unusable: nobody can send from
@@ -332,7 +294,7 @@ routes = do
     user <- requireUser
     unless (canAssignOwners user) $
       forbidden "Only admins can change an account's owner."
-    SetOwnerBody rawOwner <- decodeBody
+    SetOwnerRequest {setOwnerRequestOwner = rawOwner} <- decodeBody
     aid <- param "id"
     let owner = Username (T.toLower (T.strip rawOwner))
     users <- lift (asks envUsers)
@@ -350,7 +312,7 @@ routes = do
         _ <- liftIO (storeSetAccountOwner store (AccountId aid) owner)
         updated <- liftIO (storeGetAccount store (AccountId aid))
         -- maybe default f m: fall back to the balance we already have.
-        maybe (pure ()) (\(account, b) -> json (accountJson account b)) updated
+        maybe (pure ()) (\(account, b) -> json (accountView account b)) updated
         when (null updated) $ json (object ["id" .= aid, "balanceCents" .= bal])
 
   get "/api/accounts/:id/entries" $ do
@@ -367,7 +329,7 @@ routes = do
     user <- requireUser
     unless (canDeposit user) $
       forbidden "Only admins can make deposits."
-    DepositBody to cents <- decodeBody
+    DepositRequest {depositRequestTo = to, depositRequestAmountCents = cents} <- decodeBody
     -- Validate the raw number into an Amount right at the edge. After this
     -- line, "amount" is guaranteed valid (see Ledger.Money).
     amount <- requireAmount cents
@@ -376,7 +338,13 @@ routes = do
 
   post "/api/transfers" $ do
     user <- requireUser
-    TransferBody from to cents rawMemo <- decodeBody
+    TransferRequestBody
+      { transferRequestBodyFrom = from
+      , transferRequestBodyTo = to
+      , transferRequestBodyAmountCents = cents
+      , transferRequestBodyMemo = rawMemo
+      } <-
+      decodeBody
     amount <- requireAmount cents
     -- fromMaybe "" rawMemo: use the memo if one was sent, otherwise "".
     memo <- requireValid "invalid_memo" (validMemo (fromMaybe "" rawMemo))
@@ -584,24 +552,4 @@ requireValid code = either (\msg -> failWith status400 code msg >> finish) pure
 -- | Send an error response: { "error": "<code>", "message": "<text>" }.
 -- The front end shows "message"; code can branch on "error".
 failWith :: Status -> Text -> Text -> Handler ()
-failWith st code msg = status st >> json (object ["error" .= code, "message" .= msg])
-
--- | The JSON shape of an account, including its balance. "owner" is null
--- for system accounts.
-accountJson :: Account -> Cents -> Value
-accountJson a bal =
-  object
-    [ "id" .= accountId a
-    , "name" .= accountName a
-    , "kind" .= accountKind a
-    , "owner" .= accountOwner a
-    , "balanceCents" .= bal
-    ]
-
--- | { "username": "alice", "role": "customer" }
-userJson :: User -> Value
-userJson user =
-  object
-    [ "username" .= userName user
-    , "role" .= (case userRole user of RoleCustomer -> "customer"; RoleAdmin -> "admin" :: Text)
-    ]
+failWith st code msg = status st >> json (ErrorBody code msg)

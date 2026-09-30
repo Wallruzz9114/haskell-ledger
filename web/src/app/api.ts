@@ -5,59 +5,31 @@ import {
   type FetchArgs,
   type FetchBaseQueryError,
 } from '@reduxjs/toolkit/query/react'
+// The API's types are generated from the Haskell code (backend/src/Ledger/Api.hs),
+// so they can't drift from what the server really sends. The short names
+// below are what the rest of the app uses.
+import type {
+  AccountView,
+  DepositRequest,
+  Entry as ApiEntry,
+  ErrorBody,
+  LoginRequest,
+  OpenAccountRequest,
+  Transfer as ApiTransfer,
+  TransferRequestBody,
+  UserView,
+} from './generated/apiTypes'
 
-export type AccountKind = 'Customer' | 'External'
-export type Role = 'customer' | 'admin'
-
-export interface User {
-  username: string
-  role: Role
-}
-
-export interface Account {
-  id: string
-  name: string
-  kind: AccountKind
-  /** null for system accounts like "external". */
-  owner: string | null
-  balanceCents: number
-}
-
-/** One side of a transfer, as seen from one account. */
-export interface Entry {
-  transfer: number
-  account: string
-  /** Negative when money left this account, positive when it arrived. */
-  amount: number
-  /** The account on the other side: who paid this account, or who it paid. */
-  counterparty: string
-  memo: string
-  /** ISO 8601 timestamp in UTC, e.g. "2026-09-29T18:05:12.345Z". */
-  createdAt: string
-}
-
-export interface Transfer {
-  id: number
-  from: string
-  to: string
-  amount: number
-  memo: string
-  createdAt: string
-}
-
+export type { AccountKind, Role } from './generated/apiTypes'
+export type Account = AccountView
+export type User = UserView
+export type Entry = ApiEntry
+export type Transfer = ApiTransfer
 /** Every error from the Haskell API has this shape, e.g. insufficient_funds. */
-export interface ApiError {
-  error: string
-  message: string
-}
+export type ApiError = ErrorBody
 
-export interface TransferInput {
-  from: string
-  to: string
-  amountCents: number
-  memo: string
-  idempotencyKey: string
-}
+/** A transfer request plus the Idempotency-Key header it's sent with. */
+export type TransferInput = TransferRequestBody & { idempotencyKey: string }
 
 const rawBaseQuery = fetchBaseQuery({
   // An absolute URL built from the page's own origin, so the same code
@@ -103,7 +75,7 @@ export const ledgerApi = createApi({
       query: () => 'me',
       providesTags: ['Me'],
     }),
-    login: build.mutation<User, { username: string; password: string }>({
+    login: build.mutation<User, LoginRequest>({
       query: (body) => ({ url: 'login', method: 'POST', body }),
       invalidatesTags: ['Me', 'Account'],
     }),
@@ -123,7 +95,7 @@ export const ledgerApi = createApi({
       query: (id) => `accounts/${encodeURIComponent(id)}/entries`,
       providesTags: ['Account'],
     }),
-    openAccount: build.mutation<Account, { id: string; name: string; owner?: string }>({
+    openAccount: build.mutation<Account, OpenAccountRequest>({
       query: (body) => ({ url: 'accounts', method: 'POST', body }),
       invalidatesTags: ['Account'],
     }),
@@ -135,7 +107,7 @@ export const ledgerApi = createApi({
       }),
       invalidatesTags: ['Account'],
     }),
-    deposit: build.mutation<Transfer, { to: string; amountCents: number; idempotencyKey: string }>({
+    deposit: build.mutation<Transfer, DepositRequest & { idempotencyKey: string }>({
       query: ({ idempotencyKey, ...body }) => ({
         url: 'deposits',
         method: 'POST',

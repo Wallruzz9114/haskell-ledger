@@ -1,2 +1,6 @@
 packages: backend
 
+-- aeson-typescript (see Ledger.Api) uses string-interpolate, whose 0.3.4+
+-- releases parse with ghc-hs-meta, which can't handle one of
+-- aeson-typescript's expressions ("toType: not implemented: Proxy a").
+constraints: string-interpolate <0.3.4
