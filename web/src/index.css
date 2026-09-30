@@ -14,6 +14,9 @@
   --accent-soft: #edf2ff;
   --positive: #1f7a4d;
   --negative: #c0392b;
+  /* The chart's line and fill. Checked with the dataviz palette validator:
+     inside the lightness band and >= 3:1 against the card, in both modes. */
+  --chart: #3b5bdb;
   --radius: 10px;
   font-family:
     system-ui,
@@ -37,6 +40,7 @@
     --accent-soft: #1f2a44;
     --positive: #4cc38a;
     --negative: #ff6b6b;
+    --chart: #6788f0;
   }
 }
 
@@ -306,4 +310,232 @@ th {
 
 .entries .memo {
   overflow-wrap: anywhere;
+}
+
+/* Navigation tabs --------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 10px 14px;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* Dashboard --------------------------------------------------------------- */
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.hero-card p {
+  margin: 0;
+}
+
+/* The one big number the dashboard leads with. Proportional figures (not
+   tabular) read better at this size. */
+.hero-figure {
+  font-size: 3rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.chart-title {
+  margin: 20px 0 4px;
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.month-switcher {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.month-switcher h2 {
+  margin: 0;
+  min-width: 11ch;
+  text-align: center;
+}
+
+button.icon {
+  padding: 4px 12px;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.stat {
+  font-size: 1.8rem;
+  font-weight: 700;
+  margin: 2px 0 14px;
+}
+
+.stat.positive {
+  color: var(--positive);
+}
+
+.stat.negative {
+  color: var(--negative);
+}
+
+h3 {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.party-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.party-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.party-list li:last-child {
+  border-bottom: none;
+}
+
+/* Balance chart ------------------------------------------------------------ */
+
+.chart-plot {
+  position: relative;
+  border-radius: 8px;
+}
+
+.chart-plot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none;
+}
+
+/* Recessive axes: hairline gridlines one step off the surface. */
+.chart .grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.chart .tick {
+  fill: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart .line {
+  fill: none;
+  stroke: var(--chart);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* The area under the line: the same hue as a faint wash. */
+.chart .area {
+  fill: var(--chart);
+  opacity: 0.1;
+}
+
+.chart .crosshair {
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+
+/* The hovered day's dot, with a ring in the card color so it stays crisp
+   where it sits on the line. */
+.chart .dot {
+  fill: var(--chart);
+  stroke: var(--card);
+  stroke-width: 2;
+}
+
+.chart-tooltip {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  padding: 6px 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.08);
+}
+
+.chart-table {
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+
+.chart-table summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.chart-table table {
+  margin-top: 8px;
+}
+
+/* Transactions ------------------------------------------------------------- */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.filters input {
+  flex: 1 1 240px;
+}
+
+.transactions td {
+  vertical-align: top;
+}
+
+.transactions .when {
+  white-space: nowrap;
+  font-size: 0.9rem;
+  width: 1%;
+  padding-right: 16px;
+}
+
+.load-more {
+  margin-top: 14px;
 }

@@ -2,7 +2,7 @@ import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import App from './App'
-import { accounts, alice, apiError, fakeApi } from './test/fakeApi'
+import { accounts, alice, apiError, dashboardFor, fakeApi } from './test/fakeApi'
 import { renderWithStore } from './test/render'
 
 describe('App', () => {
@@ -14,7 +14,7 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument()
   })
 
-  it('logs in, then shows only the logged-in customer’s accounts', async () => {
+  it('logs in to the dashboard, and the Accounts tab shows only her accounts', async () => {
     let loggedIn = false
     const seen = fakeApi({
       'GET /api/me': () =>
@@ -26,6 +26,7 @@ describe('App', () => {
         return { status: 200, body: alice }
       },
       'GET /api/accounts': () => ({ status: 200, body: accounts }),
+      'GET /api/dashboard': () => ({ status: 200, body: dashboardFor() }),
     })
     renderWithStore(<App />)
 
@@ -33,6 +34,9 @@ describe('App', () => {
     await userEvent.type(screen.getByLabelText('Password'), 'secret')
     await userEvent.click(screen.getByRole('button', { name: 'Log in' }))
 
+    // The dashboard is the first page.
+    expect(await screen.findByText('Total balance')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Accounts' }))
     expect(await screen.findByText('Your accounts')).toBeInTheDocument()
     // The account appears as a button in the list (and also as a suggestion
     // in the transfer form, so look for the button specifically).

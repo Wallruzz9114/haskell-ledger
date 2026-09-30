@@ -10,17 +10,32 @@ import {
 // below are what the rest of the app uses.
 import type {
   AccountView,
+  DashboardView,
   DepositRequest,
   Entry as ApiEntry,
   ErrorBody,
   LoginRequest,
   OpenAccountRequest,
   Transfer as ApiTransfer,
+  TransactionsPageView,
   TransferRequestBody,
   UserView,
 } from './generated/apiTypes'
 
-export type { AccountKind, Role } from './generated/apiTypes'
+export type {
+  AccountKind,
+  BalancePointView,
+  DashboardView,
+  PartyView,
+  Role,
+  TransactionView,
+} from './generated/apiTypes'
+
+/** What the transactions page filters by. */
+export interface TransactionFilter {
+  q: string
+  account: string
+}
 export type Account = AccountView
 export type User = UserView
 export type Entry = ApiEntry
@@ -91,6 +106,33 @@ export const ledgerApi = createApi({
       query: () => 'accounts',
       providesTags: ['Account'],
     }),
+    /** The dashboard for one month ("2026-09"), or this month if omitted. */
+    dashboard: build.query<DashboardView, string | undefined>({
+      query: (month) => (month ? `dashboard?month=${encodeURIComponent(month)}` : 'dashboard'),
+      providesTags: ['Account'],
+    }),
+    /**
+     * Transactions, 25 at a time. An "infinite query" keeps every page loaded
+     * so far and knows how to ask for the next one: the page param is the
+     * cursor the API sent with the previous page (null for the first page).
+     */
+    transactions: build.infiniteQuery<TransactionsPageView, TransactionFilter, string | null>({
+      infiniteQueryOptions: {
+        initialPageParam: null,
+        // undefined means "no more pages".
+        getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+      },
+      query: ({ queryArg, pageParam }) => ({
+        url: 'transactions',
+        params: {
+          limit: 25,
+          ...(queryArg.q ? { q: queryArg.q } : {}),
+          ...(queryArg.account ? { account: queryArg.account } : {}),
+          ...(pageParam ? { before: pageParam } : {}),
+        },
+      }),
+      providesTags: ['Account'],
+    }),
     accountEntries: build.query<Entry[], string>({
       query: (id) => `accounts/${encodeURIComponent(id)}/entries`,
       providesTags: ['Account'],
@@ -134,6 +176,8 @@ export const {
   useLogoutMutation,
   useListAccountsQuery,
   useAccountEntriesQuery,
+  useDashboardQuery,
+  useTransactionsInfiniteQuery,
   useOpenAccountMutation,
   useSetOwnerMutation,
   useDepositMutation,

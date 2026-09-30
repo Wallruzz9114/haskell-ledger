@@ -25,7 +25,7 @@ import Ledger.Seed (seedDemoData)
 import Ledger.Session (hashPassword)
 import Ledger.Store
 import Ledger.Types
-import Network.HTTP.Types (Header, methodGet, methodPost, methodPut)
+import Network.HTTP.Types (Header, methodGet, methodPost, methodPut, status200)
 import Network.Wai (Application, RequestBodyLength (..), defaultRequest, requestBodyLength, requestHeaders, requestMethod)
 import qualified Network.Wai.Test as WaiTest
 import Test.Hspec
@@ -95,6 +95,52 @@ spec = do
         Map.lookup "createdAt" newest `shouldSatisfy` \case
           Just (String t) -> "T" `T.isInfixOf` t
           _ -> False
+
+  describe "dashboard" $ with demoApp $ do
+    it "sums the customer's own accounts and charts the last 90 days" $ do
+      cookie <- loginAs "alice"
+      response <- getAs cookie "/api/dashboard?month=2026-09"
+      liftIO $ do
+        simpleStatus response `shouldBe` status200
+        let field name = decode (simpleBody response) >>= Map.lookup (name :: Text) :: Maybe Value
+        -- alice's four accounts: 28,253 + 1,500 + 6,000 + 4,160 dollars.
+        field "totalBalanceCents" `shouldBe` Just (Number 3991300)
+        field "month" `shouldBe` Just (String "2026-09")
+        -- September in: two client payments (20,150 + 13,100 dollars).
+        -- Out: software 129, Globex's invoice 3,200, the payroll run
+        -- 11,500 and the Q3 tax 10,000. Transfers between her own accounts
+        -- (tax set-aside, savings, payroll funding) don't count.
+        field "moneyInCents" `shouldBe` Just (Number 3325000)
+        field "moneyOutCents" `shouldBe` Just (Number 2482900)
+        case field "series" of
+          Just (Array points) -> length points `shouldBe` 90
+          other -> expectationFailure ("no series: " <> show other)
+
+    it "rejects a malformed month" $ do
+      cookie <- loginAs "alice"
+      getAs cookie "/api/dashboard?month=September" `shouldRespondWith` errorCode 400 "invalid_month"
+
+  describe "transactions" $ with demoApp $ do
+    it "pages through the customer's entries with names on both sides" $ do
+      cookie <- loginAs "alice"
+      first <- getAs cookie "/api/transactions?limit=5"
+      liftIO $ do
+        let page = decode (simpleBody first) :: Maybe (Map.Map Text Value)
+        case (Map.lookup "items" =<< page, Map.lookup "nextCursor" =<< page) of
+          (Just (Array items), Just (String _)) -> length items `shouldBe` 5
+          other -> expectationFailure ("unexpected page: " <> show other)
+
+    it "searches by counterparty name" $ do
+      cookie <- loginAs "alice"
+      response <- getAs cookie "/api/transactions?q=globex%20operating"
+      liftIO $ case decode (simpleBody response) >>= Map.lookup ("items" :: Text) of
+        -- Acme paid Globex's invoice once a month.
+        Just (Array items) -> length items `shouldBe` 3
+        other -> expectationFailure ("no items: " <> show other)
+
+    it "answers 404 for someone else's account" $ do
+      cookie <- loginAs "alice"
+      getAs cookie "/api/transactions?account=globex-ops" `shouldRespondWith` errorCode 404 "unknown_account"
 
   describe "who may move money" $ with demoApp $ do
     it "lets an owner send from their account to anyone's" $ do
@@ -307,6 +353,7 @@ crashingStore =
     , storeListAccountsOwnedBy = const boom
     , storeSetAccountOwner = \_ _ -> boom
     , storeEntries = const boom
+    , storeEntriesFor = const boom
     , storeTransfer = \_ _ -> boom
     , storeTransferAt = \_ _ _ -> boom
     }

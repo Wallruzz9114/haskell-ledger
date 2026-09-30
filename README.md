@@ -33,6 +33,7 @@ A full-stack double-entry ledger: a Haskell API that moves money between account
 | `Ledger.Session` | Argon2 password hashing, and random session tokens stored only as SHA-256 hashes. |
 | `Ledger.Throttle` | Login protection: failed-attempt limits per username and per address, and a cap on password checks running at once. |
 | `Ledger.Seed` | The `external` account every ledger needs, and the demo users and data. |
+| `Ledger.Reports` | The dashboard's numbers and the transactions page's search and paging: pure functions over entries, like `Ledger.Core`. |
 | `Ledger.Api` | The shape of every API request and response, with matching TypeScript types generated from the same definitions (see below). |
 | `Ledger.App` | HTTP layer (Scotty): logins, permission checks, and the only place domain errors become status codes. |
 
@@ -75,11 +76,11 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 112 examples, 0 failures, 1 pending
+# 130 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 125 examples, 0 failures
+# 144 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
@@ -93,6 +94,7 @@ The tests are split by area under `backend/test`:
 | `Ledger/UserStoreSpec.hs` | The user store contract against the in-memory store |
 | `Ledger/MoneySpec.hs` | `mkAmount` (including the maximum amount) and `formatCents` |
 | `Ledger/ValidateSpec.hs` | The rules for account ids and names, memos and idempotency keys |
+| `Ledger/ReportsSpec.hs` | Dashboard totals (money in/out ignore transfers between your own accounts), the balance series, search and paging, including QuickCheck properties: the chart always ends at today's total, and paging visits every transaction exactly once |
 | `Ledger/MigrationsSpec.hs` | Every SQL file in `db/migrations` is listed in `Ledger.Db` |
 | `Ledger/TypeScriptSpec.hs` | The generated TypeScript types match the Haskell ones |
 | `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, gives each account the right owner, is dated July to September in order, and seeding twice changes nothing |
@@ -118,6 +120,9 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 | `src/app/money.test.ts` | Formatting cents and parsing typed amounts, with no floating-point rounding and the API's maximum |
 | `src/app/api.test.ts` | Reading error messages and 401s from API responses |
 | `src/app/idempotency.test.ts` | Idempotency keys: valid UUIDs, never repeated, and made without `crypto.randomUUID` so plain-HTTP pages work |
+| `src/features/dashboard/DashboardPage.test.tsx` | The total, money in/out with names, switching months, reading the chart with the keyboard, and its table view |
+| `src/features/dashboard/format.test.ts` | Day and month labels (no time-zone shift), axis labels, and axis ticks that always cover the data |
+| `src/features/transactions/TransactionsPage.test.tsx` | Names on both sides, "Load more" sending the cursor, search waiting for typing to pause, and only your own accounts in the filter |
 | `src/App.test.tsx` | Logged out shows the login page, logging in shows your accounts, logging out goes back, and an unreachable API offers a retry that works |
 | `src/features/auth/LoginPage.test.tsx` | Wrong-password and lockout messages |
 | `src/features/accounts/AccountsPanel.test.tsx` | Customers vs admins: what each sees, and balances refreshing when the tab gets focus again |
@@ -314,7 +319,7 @@ Open <http://localhost:5173> and log in as one of the demo users:
 - **alice** or **bob** see only their own accounts, can send money from them to any account id (for example alice paying `globex-ops`), and can open new accounts for themselves.
 - **admin** sees every account with its owner, makes deposits, opens accounts for users, and assigns owners. Admins can't send money out of customers' accounts, so there's no transfer form.
 
-Click an account to see its double-entry history: when each transfer happened, who was on the other side, the memo, and the amount. Balances refresh by themselves when you come back to the tab or your connection returns, so a payment made elsewhere shows up without reloading. If the API can't be reached, the page says so and offers **Try again**. Vite forwards `/api` requests to the Haskell server, so the browser only ever talks to one origin: the session cookie just works, and there's no CORS to set up.
+The app has three pages. **Dashboard** leads with your total balance and a 90-day balance chart (hover it, or use the arrow keys), then the month's money in and money out with top sources and spending; switch months with ‹ ›. **Transactions** lists everything across your accounts with names on both sides, a search box, an account filter and "Load more". **Accounts** is where you move money: click an account to see its double-entry history: when each transfer happened, who was on the other side, the memo, and the amount. Balances refresh by themselves when you come back to the tab or your connection returns, so a payment made elsewhere shows up without reloading. If the API can't be reached, the page says so and offers **Try again**. Vite forwards `/api` requests to the Haskell server, so the browser only ever talks to one origin: the session cookie just works, and there's no CORS to set up.
 
 Front-end commands, from `web/`:
 
@@ -410,6 +415,8 @@ Every endpoint except `/api/health` and `/api/login` needs a logged-in session (
 | `POST` | `/api/accounts` | logged in | Open an account: `{ "id", "name", "owner"? }`. `owner` defaults to you; only an admin may name someone else. | 201 |
 | `GET` | `/api/accounts/:id` | owner or admin | One account with its balance | 200 |
 | `GET` | `/api/accounts/:id/entries` | owner or admin | An account's ledger entries, newest first (see below) | 200 |
+| `GET` | `/api/dashboard` | logged in | Total balance, a daily balance series (`?days=`, default 90) and the month's money in/out with top sources and spending (`?month=2026-09`, default this month), over your accounts (every customer account for an admin) | 200 |
+| `GET` | `/api/transactions` | logged in | Your transactions across accounts, newest first, 25 at a time: `?q=` searches memos and names, `?account=` filters, `?before=<nextCursor>` gets the next page | 200 |
 | `PUT` | `/api/accounts/:id/owner` | admin | Give a customer account an owner: `{ "owner" }` | 200 |
 | `POST` | `/api/deposits` | admin | Deposit from outside: `{ "to", "amountCents" }` | 201 |
 | `POST` | `/api/transfers` | owner of `from` | Transfer: `{ "from", "to", "amountCents", "memo"? }`, optional `Idempotency-Key` header. `to` can be anyone's account. | 201 |
@@ -454,6 +461,7 @@ Errors come back as `{ "error": "<code>", "message": "<text>" }`:
 | 400 | `invalid_account_id` | The account id breaks the rules above |
 | 400 | `invalid_account_name` | The account name is empty or too long |
 | 400 | `invalid_memo` | The memo is too long |
+| 400 | `invalid_month`, `invalid_days`, `invalid_limit`, `invalid_cursor` | A dashboard or transactions query parameter is malformed |
 | 400 | `invalid_idempotency_key` | The `Idempotency-Key` header is empty, too long, or has spaces |
 | 401 | `unauthorized` | Not logged in, or the session has expired or ended |
 | 401 | `invalid_credentials` | Wrong username or password (the same answer for both, so it doesn't reveal which usernames exist) |
@@ -528,7 +536,7 @@ haskell-ledger/
     nginx.conf               # serves the app, forwards /api to the api service
     src/app/                 # API client (RTK Query), Redux store, money helpers
     src/app/generated/       # API types generated from Haskell (don't edit by hand)
-    src/features/            # auth, accounts and transfers components, each with its tests
+    src/features/            # auth, dashboard, transactions, accounts and transfers, each with its tests
     src/index.css            # styles
   .github/workflows/ci.yml   # CI: build, lint and test both halves on every PR
 ```

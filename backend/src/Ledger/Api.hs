@@ -31,6 +31,11 @@ module Ledger.Api
   , UserView (..)
   , userView
   , ErrorBody (..)
+  , DashboardView (..)
+  , BalancePointView (..)
+  , PartyView (..)
+  , TransactionView (..)
+  , TransactionsPageView (..)
 
     -- * Requests
   , LoginRequest (..)
@@ -49,7 +54,7 @@ import Data.Aeson.TypeScript.TH
 import Data.Char (toLower)
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
-import Data.Time (UTCTime)
+import Data.Time (Day, UTCTime)
 import Ledger.JsonOptions (fieldsWithout, optionalFieldsWithout)
 import Ledger.Money (Cents (..))
 import Ledger.Types
@@ -90,6 +95,51 @@ accountView a (Cents bal) =
 
 userView :: User -> UserView
 userView u = UserView {userViewUsername = let Username t = userName u in t, userViewRole = userRole u}
+
+-- | The dashboard: totals for the month, and a daily balance series.
+--   "month" is "2026-09"; money in/out leave out transfers between the
+--   viewer's own accounts.
+data DashboardView = DashboardView
+  { dashboardViewTotalBalanceCents :: Integer
+  , dashboardViewMonth :: Text
+  , dashboardViewSeries :: [BalancePointView]
+  , dashboardViewMoneyInCents :: Integer
+  , dashboardViewMoneyOutCents :: Integer
+  , dashboardViewTopSources :: [PartyView]
+  , dashboardViewTopSpending :: [PartyView]
+  }
+
+-- | The total balance at the end of one day: { "date": "2026-09-24", ... }.
+data BalancePointView = BalancePointView
+  { balancePointViewDate :: Day
+  , balancePointViewBalanceCents :: Integer
+  }
+
+-- | A counterparty with a total, for the top sources / top spending lists.
+data PartyView = PartyView
+  { partyViewAccount :: Text
+  , partyViewName :: Text
+  , partyViewAmountCents :: Integer
+  }
+
+-- | One entry on the transactions page, with display names for both sides.
+data TransactionView = TransactionView
+  { transactionViewTransfer :: Integer
+  , transactionViewAccount :: Text
+  , transactionViewAccountName :: Text
+  , transactionViewCounterparty :: Text
+  , transactionViewCounterpartyName :: Text
+  , transactionViewAmountCents :: Integer
+  , transactionViewMemo :: Text
+  , transactionViewCreatedAt :: UTCTime
+  }
+
+-- | One page of transactions. "nextCursor" is null on the last page;
+--   otherwise pass it back as ?before=... to get the next page.
+data TransactionsPageView = TransactionsPageView
+  { transactionsPageViewItems :: [TransactionView]
+  , transactionsPageViewNextCursor :: Maybe Text
+  }
 
 -- Requests ------------------------------------------------------------------
 
@@ -138,8 +188,10 @@ data DepositRequest = DepositRequest
 instance TypeScript AccountId where getTypeScriptType _ = "string"
 instance TypeScript TransferId where getTypeScriptType _ = "number"
 instance TypeScript Cents where getTypeScriptType _ = "number"
--- aeson writes times as ISO 8601 strings, e.g. "2026-09-29T18:05:12Z".
+-- aeson writes times as ISO 8601 strings, e.g. "2026-09-29T18:05:12Z",
+-- and days as "2026-09-29".
 instance TypeScript UTCTime where getTypeScriptType _ = "string"
+instance TypeScript Day where getTypeScriptType _ = "string"
 
 -- Types whose JSON is already defined in Ledger.Types: only their TypeScript
 -- is derived here, from the very same Options their ToJSON uses.
@@ -160,6 +212,11 @@ $(deriveJSONAndTypeScript defaultOptions {constructorTagModifier = map toLower .
 $(deriveJSONAndTypeScript (fieldsWithout "accountView") ''AccountView)
 $(deriveJSONAndTypeScript (fieldsWithout "userView") ''UserView)
 $(deriveJSONAndTypeScript (fieldsWithout "errorBody") ''ErrorBody)
+$(deriveJSONAndTypeScript (fieldsWithout "balancePointView") ''BalancePointView)
+$(deriveJSONAndTypeScript (fieldsWithout "partyView") ''PartyView)
+$(deriveJSONAndTypeScript (fieldsWithout "dashboardView") ''DashboardView)
+$(deriveJSONAndTypeScript (fieldsWithout "transactionView") ''TransactionView)
+$(deriveJSONAndTypeScript (fieldsWithout "transactionsPageView") ''TransactionsPageView)
 $(deriveJSONAndTypeScript (optionalFieldsWithout "loginRequest") ''LoginRequest)
 $(deriveJSONAndTypeScript (optionalFieldsWithout "openAccountRequest") ''OpenAccountRequest)
 $(deriveJSONAndTypeScript (optionalFieldsWithout "setOwnerRequest") ''SetOwnerRequest)
@@ -179,6 +236,11 @@ apiDeclarations =
     , getTypeScriptDeclarations (Proxy :: Proxy Entry)
     , getTypeScriptDeclarations (Proxy :: Proxy Transfer)
     , getTypeScriptDeclarations (Proxy :: Proxy ErrorBody)
+    , getTypeScriptDeclarations (Proxy :: Proxy DashboardView)
+    , getTypeScriptDeclarations (Proxy :: Proxy BalancePointView)
+    , getTypeScriptDeclarations (Proxy :: Proxy PartyView)
+    , getTypeScriptDeclarations (Proxy :: Proxy TransactionsPageView)
+    , getTypeScriptDeclarations (Proxy :: Proxy TransactionView)
     , getTypeScriptDeclarations (Proxy :: Proxy LoginRequest)
     , getTypeScriptDeclarations (Proxy :: Proxy OpenAccountRequest)
     , getTypeScriptDeclarations (Proxy :: Proxy SetOwnerRequest)

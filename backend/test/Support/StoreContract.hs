@@ -89,6 +89,16 @@ storeContract emptyStoreAndUsers = do
     transferCreatedAt t `shouldBe` july
     fmap (map entryCreatedAt) <$> storeEntries store bob `shouldReturn` Just [july]
 
+  it "gathers the entries of several accounts at once" $ do
+    store <- seeded
+    _ <- storeTransfer store Nothing (transfer alice bob 300)
+    entries <- storeEntriesFor store [alice, bob, AccountId "nobody"]
+    -- alice: the seeded deposit and the transfer; bob: the transfer.
+    -- Unknown accounts are skipped.
+    length entries `shouldBe` 3
+    map entryAccount entries `shouldSatisfy` all (`elem` [alice, bob])
+    storeEntriesFor store [] `shouldReturn` []
+
   it "lists accounts in id order with their balances" $ do
     store <- seeded
     -- "first f" applies f to the first half of a pair: (a, b) -> (f a, b).
