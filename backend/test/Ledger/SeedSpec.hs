@@ -6,6 +6,8 @@ module Ledger.SeedSpec (spec) where
 
 import Control.Exception (IOException, try)
 import Data.Either (isLeft)
+import Data.List (nub, sort)
+import Data.Time (UTCTime (..), fromGregorian)
 import Ledger.Seed
 import Ledger.Session (passwordMatches)
 import Ledger.Store
@@ -48,6 +50,16 @@ spec = do
     ownerOf "acme-ops" `shouldBe` [Just (Username "alice")]
     ownerOf "globex-payroll" `shouldBe` [Just (Username "bob")]
     ownerOf "external" `shouldBe` [Nothing]
+
+  it "dates the demo history from July to September 2026, oldest first" $ do
+    (store, _) <- seeded
+    Just entries <- storeEntries store (AccountId "acme-ops")
+    -- Entries come newest first, so reversed they should be in date order.
+    let dates = map entryCreatedAt (reverse entries)
+    dates `shouldBe` sort dates
+    map utctDay dates `shouldSatisfy` all (\d -> d >= fromGregorian 2026 7 1 && d <= fromGregorian 2026 9 30)
+    -- Spread across the months, not all stamped at one moment.
+    length (nub dates) `shouldBe` length dates
 
   it "changes nothing when run a second time" $ do
     (store, users) <- seeded

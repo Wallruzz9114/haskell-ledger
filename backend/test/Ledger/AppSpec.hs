@@ -308,6 +308,7 @@ crashingStore =
     , storeSetAccountOwner = \_ _ -> boom
     , storeEntries = const boom
     , storeTransfer = \_ _ -> boom
+    , storeTransferAt = \_ _ _ -> boom
     }
   where
     boom :: IO a
