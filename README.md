@@ -101,10 +101,12 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 | --- | --- |
 | `src/app/money.test.ts` | Formatting cents and parsing typed amounts, with no floating-point rounding and the API's maximum |
 | `src/app/api.test.ts` | Reading error messages and 401s from API responses |
+| `src/app/idempotency.test.ts` | Idempotency keys: valid UUIDs, never repeated, and made without `crypto.randomUUID` so plain-HTTP pages work |
 | `src/App.test.tsx` | Logged out shows the login page, logging in shows your accounts, logging out goes back |
 | `src/features/auth/LoginPage.test.tsx` | Wrong-password and lockout messages |
 | `src/features/accounts/AccountsPanel.test.tsx` | Customers vs admins: what each sees |
-| `src/features/transfers/TransferForm.test.tsx` | Only your own accounts to send from; amounts sent in cents; the same `Idempotency-Key` reused on retry; API errors shown |
+| `src/features/transfers/TransferForm.test.tsx` | Only your own accounts to send from; amounts sent in cents; the same `Idempotency-Key` on an unchanged retry but a new one once the details change (so editing a refused transfer isn't a 409); API errors shown |
+| `src/features/transfers/DepositForm.test.tsx` | Deposits: customer accounts only, and the same key rules as transfers |
 
 ## Tech stack
 

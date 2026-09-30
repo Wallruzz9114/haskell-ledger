@@ -82,6 +82,53 @@ describe('TransferForm', () => {
     expect(sends[1].headers.get('Idempotency-Key')).toBe(firstKey)
   })
 
+  it('uses a new key after the details change, so an edited retry is not a 409', async () => {
+    // Behaves like the real API: it remembers every key with the request it
+    // came with, and refuses the same key with a different request.
+    const remembered = new Map<string, string>()
+    const seen = fakeApi({
+      'GET /api/accounts': () => ({ status: 200, body: visible }),
+      'POST /api/transfers': (req) => {
+        const key = req.headers.get('Idempotency-Key') ?? ''
+        const request = JSON.stringify(req.body)
+        if (remembered.has(key) && remembered.get(key) !== request) {
+          return {
+            status: 409,
+            body: apiError(
+              'idempotency_key_reused',
+              'This Idempotency-Key was already used with a different request.',
+            ),
+          }
+        }
+        remembered.set(key, request)
+        const cents = (req.body as { amountCents: number }).amountCents
+        return cents > 150000
+          ? { status: 422, body: apiError('insufficient_funds', 'Insufficient funds.') }
+          : {
+              status: 201,
+              body: { id: 41, from: 'acme-ops', to: 'globex-ops', amount: cents, memo: '' },
+            }
+      },
+    })
+    renderWithStore(<TransferForm user={alice} />)
+
+    // Too much: refused.
+    await fillAndSend('999999.99')
+    expect(await screen.findByText('Insufficient funds.')).toBeInTheDocument()
+    // Lower the amount and send again: accepted, not "key already used".
+    const amount = screen.getByLabelText('Amount (USD)')
+    await userEvent.clear(amount)
+    await userEvent.type(amount, '25')
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(await screen.findByText('Sent $25.00 as transfer #41.')).toBeInTheDocument()
+
+    const keys = seen
+      .filter((r) => r.path === '/api/transfers')
+      .map((r) => r.headers.get('Idempotency-Key'))
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).not.toBe(keys[0])
+  })
+
   it('checks the amount before sending anything', async () => {
     const seen = fakeApi({ 'GET /api/accounts': () => ({ status: 200, body: visible }) })
     renderWithStore(<TransferForm user={alice} />)

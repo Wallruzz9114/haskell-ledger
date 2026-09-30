@@ -121,8 +121,13 @@ export const ledgerApi = createApi({
       }),
       invalidatesTags: ['Account'],
     }),
-    deposit: build.mutation<Transfer, { to: string; amountCents: number }>({
-      query: (body) => ({ url: 'deposits', method: 'POST', body }),
+    deposit: build.mutation<Transfer, { to: string; amountCents: number; idempotencyKey: string }>({
+      query: ({ idempotencyKey, ...body }) => ({
+        url: 'deposits',
+        method: 'POST',
+        body,
+        headers: { 'Idempotency-Key': idempotencyKey },
+      }),
       invalidatesTags: ['Account'],
     }),
     transfer: build.mutation<Transfer, TransferInput>({

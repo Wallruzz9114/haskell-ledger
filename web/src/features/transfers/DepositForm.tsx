@@ -1,15 +1,22 @@
 import { useState, type SubmitEvent } from 'react'
 import { errorMessage, useDepositMutation, useListAccountsQuery } from '../../app/api'
-import { parseDollarsToCents } from '../../app/money'
+import { formatCents, parseDollarsToCents } from '../../app/money'
+import { useDraftKey } from '../../app/useDraftKey'
 
-/** Admin only: bring money into the ledger from outside. */
+/**
+ * Admin only: bring money into the ledger from outside.
+ *
+ * Sends an Idempotency-Key like the transfer form, so pressing Deposit again
+ * after a timeout can't deposit the money twice.
+ */
 export function DepositForm() {
   const { data: accounts = [] } = useListAccountsQuery()
   const customerAccounts = accounts.filter((a) => a.kind === 'Customer')
   const [to, setTo] = useState('')
   const [amount, setAmount] = useState('')
   const [localError, setLocalError] = useState<string | null>(null)
-  const [deposit, { isLoading, error }] = useDepositMutation()
+  const { key, renew, edited } = useDraftKey()
+  const [deposit, { isLoading, error, data, reset }] = useDepositMutation()
 
   async function submit(e: SubmitEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -19,18 +26,21 @@ export function DepositForm() {
       return
     }
     setLocalError(null)
-    const result = await deposit({ to, amountCents: cents })
-    if ('data' in result) setAmount('')
+    const result = await deposit({ to, amountCents: cents, idempotencyKey: key })
+    if ('data' in result) {
+      setAmount('')
+      renew()
+    }
   }
 
   return (
     <section className="card">
       <h2>Deposit</h2>
-      <form className="inline-form" onSubmit={submit}>
+      <form className="inline-form" onSubmit={submit} onChange={() => data && reset()}>
         <select
           aria-label="Into account"
           value={to}
-          onChange={(e) => setTo(e.target.value)}
+          onChange={(e) => edited(setTo)(e.target.value)}
           required
         >
           <option value="">Into account</option>
@@ -45,7 +55,7 @@ export function DepositForm() {
           placeholder="0.00"
           aria-label="Amount"
           value={amount}
-          onChange={(e) => setAmount(e.target.value)}
+          onChange={(e) => edited(setAmount)(e.target.value)}
           required
         />
         <button type="submit" disabled={isLoading}>
@@ -53,6 +63,11 @@ export function DepositForm() {
         </button>
         {localError && <p className="error">{localError}</p>}
         {error && <p className="error">{errorMessage(error)}</p>}
+        {data && (
+          <p className="success">
+            Deposited {formatCents(data.amount)} into {data.to}.
+          </p>
+        )}
       </form>
     </section>
   )

@@ -12,8 +12,11 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
-    // Each test file gets a fresh environment, so mocked fetches and Redux
-    // stores can't leak between files.
+    // Undo mocks and stubbed globals (like the fake fetch) after every test,
+    // so a test that forgets to set up its own fake API fails loudly instead
+    // of silently reusing the previous test's. restoreMocks alone doesn't
+    // undo vi.stubGlobal; unstubGlobals does.
     restoreMocks: true,
+    unstubGlobals: true,
   },
 })

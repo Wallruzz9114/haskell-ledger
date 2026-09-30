@@ -1,13 +1,14 @@
 import { useState, type SubmitEvent } from 'react'
 import { errorMessage, useListAccountsQuery, useTransferMutation, type User } from '../../app/api'
 import { formatCents, parseDollarsToCents } from '../../app/money'
+import { useDraftKey } from '../../app/useDraftKey'
 
 /**
  * Send money from one of your accounts to any account id.
  *
- * One idempotency key per draft transfer. If the user double-clicks or the
- * network retries, the server sees the same key and moves the money once.
- * A fresh key is only minted after a transfer succeeds.
+ * One idempotency key per draft (see useDraftKey): resending the same
+ * details reuses it, so a retry can't move money twice; changing any detail
+ * or finishing a transfer starts a new one.
  */
 export function TransferForm({ user }: Readonly<{ user: User }>) {
   const { data: accounts = [] } = useListAccountsQuery()
@@ -16,7 +17,7 @@ export function TransferForm({ user }: Readonly<{ user: User }>) {
   const [to, setTo] = useState('')
   const [amount, setAmount] = useState('')
   const [memo, setMemo] = useState('')
-  const [draftKey, setDraftKey] = useState(() => crypto.randomUUID())
+  const { key: draftKey, renew, edited } = useDraftKey()
   const [localError, setLocalError] = useState<string | null>(null)
   const [transfer, { isLoading, error, data, reset }] = useTransferMutation()
 
@@ -38,7 +39,7 @@ export function TransferForm({ user }: Readonly<{ user: User }>) {
     if ('data' in result) {
       setAmount('')
       setMemo('')
-      setDraftKey(crypto.randomUUID())
+      renew()
     }
   }
 
@@ -48,7 +49,7 @@ export function TransferForm({ user }: Readonly<{ user: User }>) {
       <form className="stack" onSubmit={submit} onChange={() => data && reset()}>
         <label>
           <span>From</span>
-          <select value={from} onChange={(e) => setFrom(e.target.value)} required>
+          <select value={from} onChange={(e) => edited(setFrom)(e.target.value)} required>
             <option value="">Choose one of your accounts</option>
             {mine.map((a) => (
               <option key={a.id} value={a.id}>
@@ -65,7 +66,7 @@ export function TransferForm({ user }: Readonly<{ user: User }>) {
             list="transfer-targets"
             placeholder="e.g. globex-ops"
             value={to}
-            onChange={(e) => setTo(e.target.value)}
+            onChange={(e) => edited(setTo)(e.target.value)}
             required
           />
         </label>
@@ -84,13 +85,17 @@ export function TransferForm({ user }: Readonly<{ user: User }>) {
             inputMode="decimal"
             placeholder="0.00"
             value={amount}
-            onChange={(e) => setAmount(e.target.value)}
+            onChange={(e) => edited(setAmount)(e.target.value)}
             required
           />
         </label>
         <label>
           <span>Memo</span>
-          <input placeholder="Optional" value={memo} onChange={(e) => setMemo(e.target.value)} />
+          <input
+            placeholder="Optional"
+            value={memo}
+            onChange={(e) => edited(setMemo)(e.target.value)}
+          />
         </label>
         <button type="submit" disabled={isLoading}>
           {isLoading ? 'Sending…' : 'Send'}
