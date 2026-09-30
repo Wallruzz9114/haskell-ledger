@@ -12,7 +12,7 @@
 -- the globex-* accounts, and admin can see everything and make deposits.
 module Ledger.AppSpec (spec) where
 
-import Control.Exception (throwIO)
+import Control.Exception (Exception, throwIO)
 import Data.Aeson (Value (..), decode, encode, object, (.=))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -25,7 +25,7 @@ import Ledger.Seed (seedDemoData)
 import Ledger.Session (hashPassword)
 import Ledger.Store
 import Ledger.Types
-import Network.HTTP.Types (Header, methodGet, methodPost, methodPut, status200)
+import Network.HTTP.Types (Header, methodGet, methodPost, methodPut, status200, status503)
 import Network.Wai (Application, RequestBodyLength (..), defaultRequest, requestBodyLength, requestHeaders, requestMethod)
 import qualified Network.Wai.Test as WaiTest
 import Test.Hspec
@@ -312,12 +312,32 @@ spec = do
       response <- WaiTest.runSession (WaiTest.srequest loginRequest >> WaiTest.request oversized) application
       errorCodeOf (WaiTest.simpleBody response) `shouldBe` Just "payload_too_large"
 
+  describe "health check" $ do
+    describe "with a working store" $ with demoApp $
+      it "says ok" $
+        get "/api/health" `shouldRespondWith` 200
+    describe "when the database can't be reached" $ with unavailableApp $
+      it "says unavailable with a 503, so the instance gets no traffic" $
+        get "/api/health" `shouldRespondWith` 503
+
+  describe "when the database can't be reached" $ with unavailableApp $
+    it "answers 503 with Retry-After and a request id: temporary, not a bug" $ do
+      cookie <- loginAs "alice"
+      response <- getAs cookie "/api/accounts"
+      liftIO $ do
+        simpleStatus response `shouldBe` status503
+        errorCodeOf (simpleBody response) `shouldBe` Just "service_unavailable"
+        lookup "Retry-After" (simpleHeaders response) `shouldBe` Just "5"
+        requestIdOf (simpleBody response) `shouldSatisfy` maybe False ((== 8) . T.length)
+
   describe "when the store crashes" $ with crashingApp $
     it "answers with a JSON 500 that doesn't leak the error's details" $ do
       cookie <- loginAs "alice"
       response <- getAs cookie "/api/accounts"
       liftIO $ do
         errorCodeOf (simpleBody response) `shouldBe` Just "internal_error"
+        -- A reference the user can quote, matching the server's log line.
+        requestIdOf (simpleBody response) `shouldSatisfy` maybe False ((== 8) . T.length)
         -- BS.isInfixOf: does the first text appear anywhere in the second?
         BL.toStrict (simpleBody response) `shouldNotSatisfy` BS.isInfixOf "internal detail"
 
@@ -345,9 +365,23 @@ crashingApp = do
   app =<< newEnv crashingStore users SecureOverHttps False
 
 crashingStore :: LedgerStore
-crashingStore =
+crashingStore = storeThatThrows (userError "internal detail")
+
+-- | A ledger store that can't reach its database: every operation throws
+-- StoreUnavailable, like the Postgres store during an outage.
+unavailableApp :: IO Application
+unavailableApp = do
+  users <- newInMemoryUserStore
+  hash <- hashPassword "test-password"
+  _ <- storeCreateUser users (User (Username "alice") RoleCustomer) hash
+  app =<< newEnv (storeThatThrows (StoreUnavailable "connection refused")) users SecureOverHttps False
+
+-- | A ledger store where every operation throws the given exception.
+storeThatThrows :: Exception e => e -> LedgerStore
+storeThatThrows problem =
   LedgerStore
-    { storeOpenAccount = \_ _ _ _ -> boom
+    { storePing = boom
+    , storeOpenAccount = \_ _ _ _ -> boom
     , storeGetAccount = const boom
     , storeListAccounts = boom
     , storeListAccountsOwnedBy = const boom
@@ -359,7 +393,7 @@ crashingStore =
     }
   where
     boom :: IO a
-    boom = throwIO (userError "internal detail")
+    boom = throwIO problem
 
 -- Requests ------------------------------------------------------------------------
 
@@ -424,6 +458,13 @@ errorCodeOf body = do
   fields <- decode body :: Maybe (Map.Map Text Value)
   String code <- Map.lookup "error" fields
   pure code
+
+-- | The "requestId" of a JSON error body, if there is one.
+requestIdOf :: BL.ByteString -> Maybe Text
+requestIdOf body = do
+  fields <- decode body :: Maybe (Map.Map Text Value)
+  String rid <- Map.lookup "requestId" fields
+  pure rid
 
 -- | The "id" of every account in a JSON list of accounts.
 accountIds :: BL.ByteString -> Maybe [Text]

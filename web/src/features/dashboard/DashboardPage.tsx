@@ -12,10 +12,18 @@ import { monthLabel, shiftMonth } from './format'
 export function DashboardPage() {
   // undefined = "this month", as the API decides it.
   const [month, setMonth] = useState<string | undefined>(undefined)
-  const { data, error, isFetching } = useDashboardQuery(month)
+  const { data, error, isFetching, refetch } = useDashboardQuery(month)
   const shown = data?.month ?? month
 
-  if (error) return <p className="error">{errorMessage(error)}</p>
+  if (error)
+    return (
+      <section className="card stack" role="alert">
+        <p className="error">{errorMessage(error)}</p>
+        <button type="button" onClick={() => refetch()} disabled={isFetching}>
+          {isFetching ? 'Trying…' : 'Try again'}
+        </button>
+      </section>
+    )
   if (!data || !shown) return <p className="muted">Loading…</p>
 
   return (

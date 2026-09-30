@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The Postgres implementation of 'LedgerStore': the same record of
@@ -20,7 +21,12 @@
 module Ledger.Store.Postgres
   ( newPostgresStore
   , newPostgresUserStore
+  , usingPool
   ) where
+
+import Control.Exception (Handler (..), IOException, catches, throwIO)
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.Text as T
 
 import Data.Aeson (Result (..), Value, fromJSON, toJSON)
 import Data.Pool (Pool, withResource)
@@ -30,7 +36,7 @@ import Database.PostgreSQL.Simple
 import Ledger.Core (checkTransfer)
 import Ledger.Money (Cents (..), unAmount)
 import Ledger.Session (TokenHash (..))
-import Ledger.Store (LedgerStore (..), UserStore (..))
+import Ledger.Store (LedgerStore (..), StoreUnavailable (..), UserStore (..))
 import Ledger.Types
 
 -- | Build a store that borrows connections from this pool.
@@ -40,7 +46,10 @@ import Ledger.Types
 newPostgresStore :: Pool Connection -> LedgerStore
 newPostgresStore pool =
   LedgerStore
-    { storeOpenAccount = \aid name kind owner -> withConn $ \conn -> do
+    { storePing = withConn $ \conn -> do
+        [Only (1 :: Int)] <- query_ conn "SELECT 1"
+        pure ()
+    , storeOpenAccount = \aid name kind owner -> withConn $ \conn -> do
         -- "ON CONFLICT DO NOTHING" makes a duplicate id insert zero rows
         -- instead of raising an error; execute returns the row count.
         inserted <-
@@ -86,7 +95,7 @@ newPostgresStore pool =
   where
     -- Borrow a connection for the length of one operation.
     withConn :: (Connection -> IO a) -> IO a
-    withConn = withResource pool
+    withConn = usingPool pool
 
     -- One transfer, at a chosen time or (Nothing) at the database's now().
     transferWithTime at mkey req = withConn $ \conn ->
@@ -121,19 +130,19 @@ newPostgresStore pool =
 newPostgresUserStore :: Pool Connection -> UserStore
 newPostgresUserStore pool =
   UserStore
-    { storeCreateUser = \user hash -> withResource pool $ \conn -> do
+    { storeCreateUser = \user hash -> usingPool pool $ \conn -> do
         inserted <-
           execute
             conn
             "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?) ON CONFLICT (username) DO NOTHING"
             (usernameText (userName user), hash, roleText (userRole user))
         pure (inserted == 1)
-    , storeFindUser = \name -> withResource pool $ \conn -> do
+    , storeFindUser = \name -> usingPool pool $ \conn -> do
         rows <- query conn "SELECT username, role, password_hash FROM users WHERE username = ?" (Only (usernameText name))
         pure $ case rows of
           [(u, role, hash)] -> Just (User (Username u) (roleFromText role), hash)
           _ -> Nothing
-    , storeCreateSession = \(TokenHash token) name expires -> withResource pool $ \conn -> do
+    , storeCreateSession = \(TokenHash token) name expires -> usingPool pool $ \conn -> do
         -- Tidy up while we're here: drop sessions that have already expired,
         -- so the table doesn't grow forever.
         _ <- execute conn "DELETE FROM sessions WHERE expires_at <= now()" ()
@@ -145,7 +154,7 @@ newPostgresUserStore pool =
             "INSERT INTO sessions (token_hash, username, expires_at) VALUES (?, ?, ?)"
             (Binary token, usernameText name, expires)
         pure ()
-    , storeFindSession = \(TokenHash token) now -> withResource pool $ \conn -> do
+    , storeFindSession = \(TokenHash token) now -> usingPool pool $ \conn -> do
         rows <-
           query
             conn
@@ -155,10 +164,41 @@ newPostgresUserStore pool =
         pure $ case rows of
           [(u, role)] -> Just (User (Username u) (roleFromText role))
           _ -> Nothing
-    , storeDeleteSession = \(TokenHash token) -> withResource pool $ \conn -> do
+    , storeDeleteSession = \(TokenHash token) -> usingPool pool $ \conn -> do
         _ <- execute conn "DELETE FROM sessions WHERE token_hash = ?" (Only (Binary token))
         pure ()
     }
+
+-- | Borrow a connection from the pool for one operation, translating
+-- "can't reach the database" into StoreUnavailable.
+--
+-- Two kinds of failure mean the database is unreachable:
+--
+--   * connecting fails: libpq raises an IOException
+--     ("libpq: failed (... Connection refused)");
+--   * a connection breaks, the server shuts down, or a query runs past the
+--     statement timeout: a SqlError whose SQLSTATE code is empty, starts
+--     with 08 (connection exception) or 57P (server shutting down), or is
+--     57014 (query cancelled by the timeout).
+--
+-- Every other error (a constraint violation, a bug in a query) passes
+-- through unchanged and becomes a 500, because it isn't temporary.
+-- withResource has already thrown away the broken connection by the time
+-- we get here, so the next request gets a fresh one.
+usingPool :: Pool Connection -> (Connection -> IO a) -> IO a
+usingPool pool action =
+  withResource pool action
+    `catches` [ Handler $ \(e :: IOException) -> unavailable (show e)
+              , Handler $ \(e :: SqlError) ->
+                  if connectionLevel (sqlState e) then unavailable (show e) else throwIO e
+              ]
+  where
+    unavailable detail = throwIO (StoreUnavailable (T.pack detail))
+    connectionLevel code =
+      BS8.null code
+        || BS8.isPrefixOf "08" code
+        || BS8.isPrefixOf "57P" code
+        || code == "57014"
 
 -- | Every entry on these accounts, newest first, each joined with its
 -- transfer for the memo and time. The counterparty is whichever end of the

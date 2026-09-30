@@ -8,6 +8,7 @@
 module Ledger.Store
   ( LedgerStore (..)
   , newInMemoryStore
+  , StoreUnavailable (..)
   , UserStore (..)
   , newInMemoryUserStore
   ) where
@@ -15,6 +16,7 @@ module Ledger.Store
 -- STM = Software Transactional Memory: TVar, atomically, readTVar, etc.
 -- No import list means "import everything this module exports".
 import Control.Concurrent.STM
+import Control.Exception (Exception)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -43,7 +45,10 @@ import Ledger.Types
 -- Main picks one at startup; no caller knows or cares which it got. This is
 -- dependency injection with no framework.
 data LedgerStore = LedgerStore
-  { storeOpenAccount :: AccountId -> Text -> AccountKind -> Maybe Username -> IO (Either OpenAccountError Account)
+  { -- | Check the store can be reached right now (the health check uses
+    -- this). Throws StoreUnavailable if it can't.
+    storePing :: IO ()
+  , storeOpenAccount :: AccountId -> Text -> AccountKind -> Maybe Username -> IO (Either OpenAccountError Account)
   , storeGetAccount :: AccountId -> IO (Maybe (Account, Cents))
   , storeListAccounts :: IO [(Account, Cents)]
   , -- | Only the accounts this user owns. Customers see just these, so the
@@ -64,6 +69,17 @@ data LedgerStore = LedgerStore
     -- the HTTP API never exposes it, so clients can't backdate anything.
     storeTransferAt :: UTCTime -> Maybe IdempotencyKey -> TransferRequest -> IO (Either TransferError Transfer)
   }
+
+-- | Thrown by a store when it can't reach its database at all: the server
+-- is down, the connection dropped, or a query ran past its time limit.
+-- It means "try again shortly", not "there's a bug", so the HTTP layer
+-- answers 503 for it instead of 500. The HTTP layer only knows this type,
+-- never the Postgres library's own exceptions.
+newtype StoreUnavailable = StoreUnavailable Text
+  deriving (Show)
+
+-- "instance Exception" lets it be thrown with throwIO and caught by type.
+instance Exception StoreUnavailable
 
 -- | Remembered outcome of a request made with an idempotency key. We keep the
 -- original request so a key reused with a different body is rejected, not
@@ -132,7 +148,9 @@ newInMemoryStore = do
   -- the same way a JavaScript closure captures variables.
   pure
     LedgerStore
-      { -- "\aid name kind -> ..." is a lambda: (aid, name, kind) => ...
+      { -- Memory is always there.
+        storePing = pure ()
+      , -- "\aid name kind -> ..." is a lambda: (aid, name, kind) => ...
         -- "atomically $ do ..." runs the whole block as ONE transaction:
         -- other threads either see all of it or none of it.
         storeOpenAccount = \aid name kind owner -> atomically $ do

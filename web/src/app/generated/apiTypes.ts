@@ -50,6 +50,13 @@ export type ErrorBody = IErrorBody;
 export interface IErrorBody {
   error: string;
   message: string;
+  requestId?: string;
+}
+
+export type HealthView = IHealthView;
+
+export interface IHealthView {
+  status: string;
 }
 
 export type DashboardView = IDashboardView;

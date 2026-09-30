@@ -40,8 +40,16 @@ export function TransactionsPage({ user }: Readonly<{ user: User }>) {
     return () => clearTimeout(timer)
   }, [typed])
 
-  const { data, error, isLoading, isFetchingNextPage, hasNextPage, fetchNextPage } =
-    useTransactionsInfiniteQuery({ q: search, account })
+  const {
+    data,
+    error,
+    isLoading,
+    isFetching,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+    refetch,
+  } = useTransactionsInfiniteQuery({ q: search, account })
   const items = data?.pages.flatMap((page) => page.items) ?? []
 
   return (
@@ -65,7 +73,14 @@ export function TransactionsPage({ user }: Readonly<{ user: User }>) {
         </select>
       </div>
 
-      {error && <p className="error">{errorMessage(error)}</p>}
+      {error && (
+        <div className="stack" role="alert">
+          <p className="error">{errorMessage(error)}</p>
+          <button type="button" onClick={() => refetch()} disabled={isFetching}>
+            {isFetching ? 'Trying…' : 'Try again'}
+          </button>
+        </div>
+      )}
       {isLoading && <p className="muted">Loading…</p>}
       {!isLoading && !error && items.length === 0 && (
         <p className="muted">

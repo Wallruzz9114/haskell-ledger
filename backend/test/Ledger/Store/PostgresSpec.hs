@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | The Postgres store must pass the same store contract as the in-memory
 -- one, against a real database.
@@ -11,12 +12,12 @@ module Ledger.Store.PostgresSpec (spec) where
 import qualified Data.ByteString.Char8 as BS
 import Data.List (isSuffixOf)
 import Data.Pool (Pool, withResource)
-import Database.PostgreSQL.Simple (Connection, Only (..), execute_, query_)
+import Database.PostgreSQL.Simple (Connection, Only (..), SqlError, execute_, query_)
 import Ledger.Db (newDbPool, runMigrations)
 import Control.Monad (void)
-import Ledger.Store (LedgerStore, UserStore (..))
+import Ledger.Store (LedgerStore (..), StoreUnavailable, UserStore (..))
 import Ledger.Types (Role (..), User (..), Username)
-import Ledger.Store.Postgres (newPostgresStore, newPostgresUserStore)
+import Ledger.Store.Postgres (newPostgresStore, newPostgresUserStore, usingPool)
 import Support.StoreContract (storeContract)
 import Support.UserStoreContract (userStoreContract)
 import System.Environment (lookupEnv)
@@ -24,6 +25,12 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+  -- No database needed: nothing listens on port 1.
+  describe "when the database can't be reached" $
+    it "reports StoreUnavailable, not a raw driver error" $ do
+      pool <- newDbPool "postgresql://ledger:ledger@localhost:1/ledger"
+      storeListAccounts (newPostgresStore pool) `shouldThrow` isUnavailable
+
   -- runIO runs an IO action while hspec is BUILDING the list of tests,
   -- before any test runs. Here: read the env var and, if it's set, connect
   -- and apply migrations once for the whole file.
@@ -32,6 +39,13 @@ spec = do
   case mPool of
     Just pool -> do
       describe "ledger store" (storeContract (emptyStore pool))
+      describe "failures" $ do
+        it "cancels a query that runs past the 5-second statement timeout" $ do
+          let slowQuery = usingPool pool $ \conn -> query_ conn "SELECT pg_sleep(6)" :: IO [Only ()]
+          slowQuery `shouldThrow` isUnavailable
+        it "passes other SQL errors through: they're bugs, not outages" $ do
+          let badQuery = usingPool pool $ \conn -> query_ conn "SELECT * FROM no_such_table" :: IO [Only Int]
+          badQuery `shouldThrow` (\(_ :: SqlError) -> True)
       describe "user store" (userStoreContract (emptyUserStore pool))
     Nothing ->
       it "runs when TEST_DATABASE_URL is set" $
@@ -40,6 +54,11 @@ spec = do
 -- | Connect, refusing any database whose name doesn't end in "_test".
 -- These tests empty every table, so pointing TEST_DATABASE_URL at the dev
 -- database by mistake would wipe it. Better to stop with a clear message.
+-- | shouldThrow takes a predicate on the exception; this one accepts any
+-- StoreUnavailable.
+isUnavailable :: Selector StoreUnavailable
+isUnavailable _ = True
+
 connect :: String -> IO (Pool Connection)
 connect url = do
   pool <- newDbPool (BS.pack url)
