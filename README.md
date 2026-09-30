@@ -4,7 +4,7 @@
 
 A full-stack double-entry ledger: a Haskell API that moves money between accounts and enforces bookkeeping rules, backed by PostgreSQL, with property-based tests and a React + TypeScript + Redux Toolkit front end.
 
-> **Status: work in progress.** The API, the Postgres store, user logins, the web front end and CI work today. A one-command Docker setup is still to come; see [Progress](#progress).
+> **Status:** every planned step is done: the API, the Postgres store, user logins, the web front end, CI, and a one-command Docker setup. See [Progress](#progress).
 >
 > Built step by step while learning Haskell, so every source file carries beginner-level comments explaining the Haskell it uses.
 
@@ -113,12 +113,13 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 
 ## Continuous integration
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request and every push to `main`, as two jobs in parallel:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request and every push to `main`, as three jobs in parallel:
 
 | Job | Checks |
 | --- | --- |
 | Backend | Build with GHC 9.4.8 and `-Wall`, hlint (no hints allowed), and the whole test suite, including the Postgres tests against a Postgres 16 service container |
 | Frontend | `npm ci`, typecheck, oxlint, Prettier, Vitest, and a production build |
+| Docker images | Builds the API and web images, so a broken Dockerfile shows up on the PR (layers are cached between runs) |
 
 Compiled Haskell dependencies are cached between runs, so only the first run (or one after changing the cabal file) compiles them all.
 
@@ -132,7 +133,35 @@ Compiled Haskell dependencies are cached between runs, so only the first run (or
 | Frontend | React 19, TypeScript, Redux Toolkit (RTK Query), Vite, oxlint, Prettier |
 | Tooling | GHCup, cabal, Docker Compose, Node 22, GitHub Actions |
 
+## Quick start: everything in Docker
+
+Needs only Docker. From the repository root:
+
+```sh
+docker compose up -d
+```
+
+That builds the images, starts Postgres, adds the demo users and data, and starts the API and the site. Then open <http://localhost:3000> and log in as `alice`, `bob` or `admin` (the demo password is below).
+
+| Service | Address | What it is |
+| --- | --- | --- |
+| `web` | <http://localhost:3000> | The React app, served by nginx, which forwards `/api` to the API |
+| `api` | (internal) | The Haskell API, built from [`backend/Dockerfile`](backend/Dockerfile) |
+| `seed` | (runs once) | `ledger-seed`: applies migrations and adds the demo data, then exits. The API starts after it finishes. |
+| `db` | `localhost:5434` | Postgres 16 |
+| `adminer` | <http://localhost:8081> | A web UI for browsing the database |
+
+The first `docker compose up` builds the API image, which compiles every Haskell dependency, so expect 10 minutes or more. Later builds reuse Docker's cache and only recompile what changed. After changing the code, `docker compose up -d --build` rebuilds and restarts.
+
+The API image is built in two stages: GHC 9.4.8 (installed with ghcup) compiles the programs, and the final image holds just `ledger-api`, `ledger-seed` and the libraries they need, on Debian 12, running as a non-root user. The web image is built the same way: Node builds the app, and nginx serves it.
+
+The seed runs on every `docker compose up`, which is safe: it skips anything already there, so the data isn't duplicated. It's there for local demos; a real deployment wouldn't include the `seed` service, and the API itself never adds demo data.
+
+`docker compose down` stops everything and keeps the data; `docker compose down -v` also deletes the database.
+
 ## Running locally
+
+To work on the code, run the API and front end directly and use Docker only for the database.
 
 Requires:
 
@@ -145,10 +174,10 @@ Requires:
 ### 1. Start Postgres
 
 ```sh
-docker compose up -d
+docker compose up -d db adminer
 ```
 
-This starts two services:
+Naming the services starts only the database and its browser, without building the app images. This starts:
 
 | Service | Address | What it is |
 | --- | --- | --- |
@@ -202,7 +231,7 @@ If a demo account already exists without an owner (a database seeded before user
 To wipe everything and start again:
 
 ```sh
-docker compose down -v && docker compose up -d
+docker compose down -v && docker compose up -d db adminer
 cabal run ledger-seed
 ```
 
@@ -296,6 +325,16 @@ An admin assigns an owner with `PUT /api/accounts/:id/owner`:
 ```sh
 curl -b admin.txt -X PUT localhost:8080/api/accounts/legacy-ops/owner \
   -H 'Content-Type: application/json' -d '{"owner": "bob"}'
+```
+
+### Dependencies are pinned
+
+[`cabal.project.freeze`](cabal.project.freeze) records the exact version of every Haskell dependency, so your machine, CI and the Docker image all build the same code. Without it, each build picks the newest versions allowed, and a new release can break one of them. That already happened once: crypton 2.x added ARM-specific C code that GCC on ARM Linux can't compile, which broke the Docker build on Apple Silicon. The cabal file now holds crypton at 1.1 for that reason.
+
+After changing `build-depends` in the cabal file, update the pins from the repository root:
+
+```sh
+cabal freeze --enable-tests
 ```
 
 ### Changing the database schema
@@ -447,16 +486,19 @@ Known limits:
 - [x] Users, sessions and account ownership
 - [x] Front end
 - [x] CI
-- [ ] Run the whole app with `docker compose up`
+- [x] Run the whole app with `docker compose up`
 
 ## Repository layout
 
 ```text
 haskell-ledger/
   cabal.project              # points cabal and the editor at backend/
-  docker-compose.yml         # Postgres and Adminer for local development
+  cabal.project.freeze       # the exact version of every Haskell dependency
+  docker-compose.yml         # the whole app: web, api, Postgres and Adminer
+  .dockerignore              # keeps the Docker build context small
   backend/
     double-entry-ledger.cabal
+    Dockerfile               # builds the API image (ledger-api and ledger-seed)
     app/Main.hs              # the API server: picks a store, starts the server
     seed/Main.hs             # the ledger-seed command: adds demo data to DATABASE_URL
     src/Ledger/*.hs          # the library (see Design)
@@ -465,6 +507,8 @@ haskell-ledger/
     test/                    # one *Spec.hs per area, plus shared Support/ modules
     api.http                 # sample requests for the REST Client extension
   web/                       # Vite + React + TypeScript front end
+    Dockerfile               # builds the app with Node, serves it with nginx
+    nginx.conf               # serves the app, forwards /api to the api service
     src/app/                 # API client (RTK Query), Redux store, money helpers
     src/features/            # auth, accounts and transfers components, each with its tests
     src/index.css            # styles

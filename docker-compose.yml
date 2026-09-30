@@ -1,12 +1,77 @@
-# Local development services. Start them with:  docker compose up -d
+# The whole app, one command:  docker compose up -d
 #
+#   web      the site, on http://localhost:3000 (nginx: the built React app,
+#            forwarding /api to the api service)
+#   api      the Haskell API (not published: reached through web)
+#   seed     runs once and exits: applies migrations and adds the demo
+#            users and data, before the api starts
 #   db       Postgres 16 on localhost:5434 (databases: ledger, ledger_test)
 #   adminer  a web UI for browsing the database, on http://localhost:8081
 #
-# The API and front end run on your machine (see README), pointed at the
-# database with DATABASE_URL.
+# Start order: db (healthy) -> seed (finished) -> api -> web.
+#
+# Only need the database, e.g. while running the API with cabal and the
+# front end with npm (see README)?
+#   docker compose up -d db adminer
+#
+# The first "up" builds the api image, which compiles every Haskell
+# dependency: expect 10+ minutes. Later builds reuse Docker's cache.
+
+# Settings shared by api and seed. "x-" keys are ignored by Compose itself;
+# "&ledger-db" names this block so "<<: *ledger-db" can reuse it below.
+x-ledger-db: &ledger-db
+  # No password in the URL: libpq (Postgres's client library) reads it from
+  # PGPASSWORD instead. Local development values only.
+  DATABASE_URL: postgresql://ledger@db:5432/ledger
+  PGPASSWORD: ledger
 
 services:
+  web:
+    build: ./web
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+  api:
+    build:
+      # The whole repository is the build context, because cabal.project
+      # lives at the root.
+      context: .
+      dockerfile: backend/Dockerfile
+    # Named, so the seed service can reuse the same image.
+    image: haskell-ledger-api
+    environment:
+      <<: *ledger-db
+      # nginx (the web service) sits in front and passes the real client
+      # address in X-Forwarded-For, which login limits count by.
+      TRUST_PROXY: "true"
+    # Run a tiny init process as PID 1, so "docker compose stop" shuts the
+    # API down straight away instead of waiting 10 seconds.
+    init: true
+    depends_on:
+      # Start only after the seed has finished successfully.
+      seed:
+        condition: service_completed_successfully
+
+  # Demo users and data, added before the API starts. Safe on every "up":
+  # the seed skips anything already there (each demo transfer has its own
+  # idempotency key), so re-running it changes nothing. This is for local
+  # demos only; the API itself never adds demo data to a database.
+  seed:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: haskell-ledger-api
+    command: ["ledger-seed"]
+    environment:
+      <<: *ledger-db
+    init: true
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
   db:
     image: postgres:16-alpine
     environment:

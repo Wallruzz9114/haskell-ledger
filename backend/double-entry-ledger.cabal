@@ -49,8 +49,11 @@ library
   build-depends:
       -- Reading and writing the session cookie.
       cookie
-      -- Secure random tokens and SHA-256 (crypton), and its byte helpers (ram).
-    , crypton
+      -- Secure random tokens, SHA-256 and Argon2 (crypton), and its byte
+      -- helpers (ram). Held at 1.1: crypton 2.x added ARM-specific SHA-3 C
+      -- code that GCC on ARM Linux can't compile, which breaks the Docker
+      -- build on Apple Silicon.
+    , crypton >=1.1 && <1.2
     , file-embed
     , http-types
     -- Network addresses, for counting failed logins per client.

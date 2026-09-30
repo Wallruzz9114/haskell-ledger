@@ -1,0 +1,6 @@
+# Keep the build context small: only what the images need is sent to Docker.
+.git
+**/dist-newstyle
+**/node_modules
+web/dist
+**/.DS_Store
