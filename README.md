@@ -32,6 +32,7 @@ The choices I'd want to talk about, and why I made them.
 - **Tested for properties, not just examples.** QuickCheck runs random sequences of transfers and checks what must always be true: balances sum to zero, no customer goes negative, and every balance equals the sum of its entries.
 
 **Tradeoffs and what I'd do next:**
+
 - **Named outside parties.** Clients and vendors are all one `external` account, so the dashboard's top sources say "External". Real payees would be the next model change.
 - **Paging and search in SQL.** The transactions page pages and searches in Haskell over the account's entries. At real volumes that should happen in the database.
 - **Shared login limits.** Login limits live in the server's memory, which only works for a single instance. With several instances they'd need to be in Postgres or Redis.
