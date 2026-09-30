@@ -38,9 +38,13 @@ import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
-import Data.Time (NominalDiffTime, addUTCTime, diffUTCTime, getCurrentTime)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import Data.Time (Day, NominalDiffTime, UTCTime (..), addUTCTime, diffUTCTime, fromGregorianValid, getCurrentTime, showGregorian)
+import Text.Read (readMaybe)
 import Ledger.Api
 import Ledger.Auth
+import Ledger.Reports
 import Ledger.Money (Amount, Cents (..), formatCents, maxAmount, mkAmount)
 import Ledger.Session
 import Ledger.Store
@@ -323,6 +327,66 @@ routes = do
     -- maybe default f m: Nothing -> the 404; Just entries -> json entries.
     maybe (failWith status404 "unknown_account" "No such account.") json found
 
+  -- Overview: the dashboard and the transactions page ----------------------
+
+  -- ?month=2026-09 (default: this month) and ?days=90 (how far back the
+  -- balance chart goes, 7 to 366).
+  get "/api/dashboard" $ do
+    user <- requireUser
+    today <- liftIO (utctDay <$> getCurrentTime)
+    month <- maybe (pure today) (requireValid "invalid_month" . parseMonth) =<< optionalParam "month"
+    days <- maybe (pure 90) (requireValid "invalid_days" . parseBounded 7 366 "days") =<< optionalParam "days"
+    (mine, names, entries) <- overviewData user
+    let total = sum (map snd mine)
+        report = dashboard (Set.fromList (map (accountId . fst) mine)) total entries today days month
+        party (PartyTotal aid amount) = PartyView (idText aid) (nameIn names aid) (centsOf amount)
+    json
+      DashboardView
+        { dashboardViewTotalBalanceCents = centsOf total
+        , -- showGregorian gives "2026-09-01"; the first 7 characters are the month.
+          dashboardViewMonth = T.take 7 (T.pack (showGregorian month))
+        , dashboardViewSeries = [BalancePointView d (centsOf b) | BalancePoint d b <- dashSeries report]
+        , dashboardViewMoneyInCents = centsOf (dashMoneyIn report)
+        , dashboardViewMoneyOutCents = centsOf (dashMoneyOut report)
+        , dashboardViewTopSources = map party (dashTopSources report)
+        , dashboardViewTopSpending = map party (dashTopSpending report)
+        }
+
+  -- ?q=words to search, ?account=acme-ops, ?before=<cursor> for the next
+  -- page, ?limit=25 (1 to 100).
+  get "/api/transactions" $ do
+    user <- requireUser
+    search <- maybe "" (T.take 100) <$> optionalParam "q"
+    account <- fmap AccountId <$> optionalParam "account"
+    before <- optionalParam "before"
+    limit <- maybe (pure 25) (requireValid "invalid_limit" . parseBounded 1 100 "limit") =<< optionalParam "limit"
+    (mine, names, entries) <- overviewData user
+    -- Asking for an account that isn't one of yours: 404, as everywhere else.
+    forM_ account $ \aid ->
+      unless (aid `elem` map (accountId . fst) mine) $
+        failWith status404 "unknown_account" "No such account." >> finish
+    -- fromIntegral converts the Integer limit to the Int that splitAt wants.
+    case transactionsPage (TransactionQuery account search before (fromIntegral limit)) names entries of
+      Left msg -> failWith status400 "invalid_cursor" msg
+      Right (items, nextCursor) ->
+        json
+          TransactionsPageView
+            { transactionsPageViewItems =
+                [ TransactionView
+                    { transactionViewTransfer = let TransferId t = entryTransfer e in t
+                    , transactionViewAccount = idText (entryAccount e)
+                    , transactionViewAccountName = nameIn names (entryAccount e)
+                    , transactionViewCounterparty = idText (entryCounterparty e)
+                    , transactionViewCounterpartyName = nameIn names (entryCounterparty e)
+                    , transactionViewAmountCents = centsOf (entryAmount e)
+                    , transactionViewMemo = entryMemo e
+                    , transactionViewCreatedAt = entryCreatedAt e
+                    }
+                | e <- items
+                ]
+            , transactionsPageViewNextCursor = nextCursor
+            }
+
   -- Moving money ------------------------------------------------------------
 
   post "/api/deposits" $ do
@@ -404,6 +468,49 @@ transferError err = case err of
     failWith status409 "idempotency_key_reused" "This Idempotency-Key was already used with a different request."
 
 -- Helpers -------------------------------------------------------------------
+
+-- | What the overview pages need: "my" accounts with balances (see
+-- inOverview), a name for every account (to show "Globex Operating"
+-- instead of globex-ops), and every entry on my accounts.
+overviewData :: User -> Handler ([(Account, Cents)], Map.Map AccountId Text, [Entry])
+overviewData user = do
+  store <- lift (asks envStore)
+  everything <- liftIO (storeListAccounts store)
+  let mine = [(a, b) | (a, b) <- everything, inOverview user a]
+      names = Map.fromList [(accountId a, accountName a) | (a, _) <- everything]
+  entries <- liftIO (storeEntriesFor store (map (accountId . fst) mine))
+  pure (mine, names, entries)
+
+-- | A query-string parameter like ?month=2026-09, if it was sent.
+-- params gives every parameter as (name, value) pairs of lazy Text.
+optionalParam :: TL.Text -> Handler (Maybe Text)
+optionalParam name = fmap TL.toStrict . lookup name <$> params
+
+-- | "2026-09" -> the first day of that month.
+parseMonth :: Text -> Either Text Day
+parseMonth input = case T.splitOn "-" input of
+  [y, m]
+    | Just year <- readMaybe (T.unpack y)
+    , Just mon <- readMaybe (T.unpack m)
+    , Just day <- fromGregorianValid year mon 1 ->
+        Right day
+  _ -> Left "month must look like 2026-09."
+
+-- | A whole number between lo and hi, e.g. ?days=90.
+parseBounded :: Integer -> Integer -> Text -> Text -> Either Text Integer
+parseBounded lo hi label input = case readMaybe (T.unpack input) of
+  Just n | n >= lo && n <= hi -> Right n
+  _ -> Left (label <> " must be a whole number from " <> T.pack (show lo) <> " to " <> T.pack (show hi) <> ".")
+
+idText :: AccountId -> Text
+idText (AccountId t) = t
+
+centsOf :: Cents -> Integer
+centsOf (Cents c) = c
+
+-- | An account's display name, or its id if we somehow don't know it.
+nameIn :: Map.Map AccountId Text -> AccountId -> Text
+nameIn names aid = Map.findWithDefault (idText aid) aid names
 
 -- | Who is logged in, or reply 401 and stop.
 requireUser :: Handler User
