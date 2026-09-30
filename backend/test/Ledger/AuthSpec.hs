@@ -44,3 +44,11 @@ spec = do
       canOpenAccountFor alice (Username "alice") `shouldBe` True
       canOpenAccountFor alice (Username "bob") `shouldBe` False
       canOpenAccountFor admin (Username "bob") `shouldBe` True
+
+  describe "inOverview" $ do
+    it "covers a customer's own accounts only" $ do
+      inOverview alice acmeOps `shouldBe` True
+      inOverview bob acmeOps `shouldBe` False
+    it "covers every customer account for an admin, but never external" $ do
+      inOverview admin acmeOps `shouldBe` True
+      inOverview admin external `shouldBe` False

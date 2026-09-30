@@ -2,11 +2,15 @@ import { configureStore, createSlice, type PayloadAction } from '@reduxjs/toolki
 import { ledgerApi } from './api'
 
 /** Client-only UI state lives in a plain slice; server state lives in RTK Query. */
+/** The three pages of the app. */
+export type Page = 'dashboard' | 'transactions' | 'accounts'
+
 interface UiState {
+  page: Page
   selectedAccountId: string | null
 }
 
-const initialState: UiState = { selectedAccountId: null }
+const initialState: UiState = { page: 'dashboard', selectedAccountId: null }
 
 export const uiSlice = createSlice({
   name: 'ui',
@@ -15,6 +19,9 @@ export const uiSlice = createSlice({
     selectAccount(state, action: PayloadAction<string | null>) {
       state.selectedAccountId = action.payload
     },
+    showPage(state, action: PayloadAction<Page>) {
+      state.page = action.payload
+    },
   },
   // Logging out clears the selection too, so the next user starts fresh.
   extraReducers: (builder) => {
@@ -22,7 +29,7 @@ export const uiSlice = createSlice({
   },
 })
 
-export const { selectAccount } = uiSlice.actions
+export const { selectAccount, showPage } = uiSlice.actions
 
 /** A new store. A function, so each test can have its own. */
 export function makeStore() {

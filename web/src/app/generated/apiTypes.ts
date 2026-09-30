@@ -52,6 +52,53 @@ export interface IErrorBody {
   message: string;
 }
 
+export type DashboardView = IDashboardView;
+
+export interface IDashboardView {
+  totalBalanceCents: number;
+  month: string;
+  series: BalancePointView[];
+  moneyInCents: number;
+  moneyOutCents: number;
+  topSources: PartyView[];
+  topSpending: PartyView[];
+}
+
+export type BalancePointView = IBalancePointView;
+
+export interface IBalancePointView {
+  date: string;
+  balanceCents: number;
+}
+
+export type PartyView = IPartyView;
+
+export interface IPartyView {
+  account: string;
+  name: string;
+  amountCents: number;
+}
+
+export type TransactionsPageView = ITransactionsPageView;
+
+export interface ITransactionsPageView {
+  items: TransactionView[];
+  nextCursor: string | null;
+}
+
+export type TransactionView = ITransactionView;
+
+export interface ITransactionView {
+  transfer: number;
+  account: string;
+  accountName: string;
+  counterparty: string;
+  counterpartyName: string;
+  amountCents: number;
+  memo: string;
+  createdAt: string;
+}
+
 export type LoginRequest = ILoginRequest;
 
 export interface ILoginRequest {

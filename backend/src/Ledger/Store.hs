@@ -17,6 +17,7 @@ module Ledger.Store
 import Control.Concurrent.STM
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Time (UTCTime, getCurrentTime)
 import Ledger.Core
@@ -52,6 +53,10 @@ data LedgerStore = LedgerStore
     -- account (system accounts can't be owned).
     storeSetAccountOwner :: AccountId -> Username -> IO Bool
   , storeEntries :: AccountId -> IO (Maybe [Entry])
+  , -- | Every entry on any of these accounts, in no particular order. The
+    -- dashboard and the transactions page work from this (see
+    -- Ledger.Reports). Unknown ids are simply skipped.
+    storeEntriesFor :: [AccountId] -> IO [Entry]
   , -- "Maybe IdempotencyKey": the key is optional, the client may not send one.
     storeTransfer :: Maybe IdempotencyKey -> TransferRequest -> IO (Either TransferError Transfer)
   , -- | The same, but recorded as happening at the given time instead of
@@ -160,6 +165,11 @@ newInMemoryStore = do
             Just ledger' -> writeTVar ledgerVar ledger' >> pure True
             Nothing -> pure False
       , storeEntries = \aid -> entriesFor aid <$> readTVarIO ledgerVar
+      , storeEntriesFor = \aids -> do
+          ledger <- readTVarIO ledgerVar
+          -- concatMap: look up each account's entries and join the lists.
+          -- "fromMaybe []" turns an unknown account (Nothing) into no entries.
+          pure (concatMap (\aid -> fromMaybe [] (entriesFor aid ledger)) aids)
       , storeTransfer = \mkey req -> do
           -- Read the clock first: STM transactions can't do IO, since STM
           -- may re-run them.

@@ -4,6 +4,8 @@ import { vi } from 'vitest'
 export interface SeenRequest {
   method: string
   path: string
+  /** The query string, e.g. query.get('month') for ?month=2026-08. */
+  query: URLSearchParams
   headers: Headers
   body: unknown
 }
@@ -24,6 +26,7 @@ export function fakeApi(routes: Record<string, Handler>): SeenRequest[] {
       const req: SeenRequest = {
         method: input.method,
         path: new URL(input.url).pathname,
+        query: new URL(input.url).searchParams,
         headers: input.headers,
         body: text ? JSON.parse(text) : undefined,
       }
@@ -63,3 +66,24 @@ export const accounts = [
     balanceCents: 150000,
   },
 ]
+
+/** A small dashboard response for alice. */
+export const dashboardFor = (month = '2026-09') => ({
+  totalBalanceCents: 3991300,
+  month,
+  series: [
+    { date: '2026-09-28', balanceCents: 3900000 },
+    { date: '2026-09-29', balanceCents: 3950000 },
+    { date: '2026-09-30', balanceCents: 3991300 },
+  ],
+  moneyInCents: month === '2026-09' ? 3325000 : 0,
+  moneyOutCents: month === '2026-09' ? 2482900 : 0,
+  topSources:
+    month === '2026-09'
+      ? [{ account: 'external', name: 'External (outside the ledger)', amountCents: 3325000 }]
+      : [],
+  topSpending:
+    month === '2026-09'
+      ? [{ account: 'globex-ops', name: 'Globex Operating', amountCents: 320000 }]
+      : [],
+})
