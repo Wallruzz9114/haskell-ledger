@@ -12,16 +12,23 @@
 -- never runs twice.
 module Ledger.Db
   ( newDbPool
+  , waitForDatabase
+  , retrying
   , runMigrations
   , migrationNames
   ) where
 
+import Control.Concurrent (threadDelay)
+import Control.Exception (Exception, try)
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.Pool (Pool, defaultPoolConfig, newPool, setNumStripes, withResource)
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.Types (Query (..))
+import qualified Data.Text as T
+import Ledger.Store (StoreUnavailable (..))
+import Ledger.Store.Postgres (usingPool)
 
 -- | Open a pool of up to 10 connections to the database at this URL, e.g.
 -- "postgresql://USER:PASSWORD@HOST:PORT/DATABASE".
@@ -32,12 +39,56 @@ import Database.PostgreSQL.Simple.Types (Query (..))
 newDbPool :: ByteString -> IO (Pool Connection)
 newDbPool url =
   -- defaultPoolConfig create destroy idleSeconds maxConnections.
+  --
+  -- Every new connection gets a 5-second statement timeout: a query that
+  -- runs longer is cancelled (and reported as the store being unavailable)
+  -- instead of holding one of only 10 connections forever.
   -- By default the pool is split into one "stripe" per CPU core, each with
   -- its own share of the 10 connections, and a request can only borrow from
   -- its own stripe. On a 10-core machine that's 1 connection per stripe, so
   -- requests would queue while other connections sit idle. One stripe keeps
   -- all 10 connections available to everyone.
-  newPool (setNumStripes (Just 1) (defaultPoolConfig (connectPostgreSQL url) close 60 10))
+  newPool (setNumStripes (Just 1) (defaultPoolConfig openConnection close 60 10))
+  where
+    openConnection = do
+      conn <- connectPostgreSQL url
+      _ <- execute_ conn "SET statement_timeout = '5s'"
+      pure conn
+
+-- | Keep trying an action that can fail with exception e (only that type),
+-- waiting between attempts: 0.5 s, then 1 s, 2 s, 4 s, then 5 s each time.
+-- After the last attempt, its exception is thrown. "report" is told about
+-- each failed attempt (the attempt number, starting at 1, and the error).
+retrying :: Exception e => Int -> (Int -> e -> IO ()) -> IO a -> IO a
+retrying attempts report action = go 1 500000
+  where
+    go n delay = do
+      result <- try action
+      case result of
+        Right a -> pure a
+        Left e
+          | n >= attempts -> ioError (userError ("gave up after " <> show n <> " attempts: " <> show e))
+          | otherwise -> do
+              report n e
+              threadDelay delay
+              go (n + 1) (min 5000000 (delay * 2))
+
+-- | Wait (about 40 seconds at most) until the database answers. A database
+-- that's still starting, or a serverless one waking from sleep, is normal
+-- at startup; without this the program would exit on the first failure.
+waitForDatabase :: Pool Connection -> IO ()
+waitForDatabase pool =
+  -- usingPool turns every "can't reach it" failure (refused connection,
+  -- "the database system is starting up", ...) into StoreUnavailable, so
+  -- that's the one exception worth retrying; anything else is a real error.
+  retrying 10 report $
+    usingPool pool $ \conn -> do
+      _ <- query_ conn "SELECT 1" :: IO [Only Int]
+      pure ()
+  where
+    report :: Int -> StoreUnavailable -> IO ()
+    report n (StoreUnavailable detail) =
+      putStrLn ("Waiting for the database (attempt " <> show n <> "): " <> takeWhile (/= '\n') (T.unpack detail))
 
 -- | Every migration, in the order it must be applied, as (file name, SQL).
 --

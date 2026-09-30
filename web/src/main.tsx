@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { setupListeners } from '@reduxjs/toolkit/query'
 import App from './App'
+import { ErrorBoundary } from './app/ErrorBoundary'
 import { store } from './app/store'
 import './index.css'
 
@@ -12,8 +13,10 @@ setupListeners(store.dispatch)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <Provider store={store}>
-      <App />
-    </Provider>
+    <ErrorBoundary>
+      <Provider store={store}>
+        <App />
+      </Provider>
+    </ErrorBoundary>
   </StrictMode>,
 )

@@ -74,4 +74,25 @@ describe('TransactionsPage', () => {
     await screen.findByRole('option', { name: 'Acme Operating' })
     expect(picker).not.toHaveTextContent('Globex Operating')
   })
+
+  it('offers a retry when loading fails', async () => {
+    let up = false
+    // The first answer is a 503; after "Try again", the API is back.
+    const seen = fakeApi({
+      'GET /api/accounts': () => ({ status: 200, body: myAccounts }),
+      'GET /api/transactions': () =>
+        up
+          ? { status: 200, body: { items: [row(1)], nextCursor: null } }
+          : {
+              status: 503,
+              body: { error: 'service_unavailable', message: 'Temporarily unavailable.' },
+            },
+    })
+    renderWithStore(<TransactionsPage user={alice} />)
+    expect(await screen.findByText('Temporarily unavailable.')).toBeInTheDocument()
+    up = true
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByText('Invoice 1')).toBeInTheDocument()
+    expect(seen.filter((r) => r.path === '/api/transactions').length).toBeGreaterThanOrEqual(2)
+  })
 })

@@ -20,7 +20,7 @@ module Ledger.App
   , externalAccountId
   ) where
 
-import Control.Exception (SomeException, catch, evaluate)
+import Control.Exception (SomeException, catch, evaluate, fromException, try)
 import Control.Monad (forM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, asks, runReaderT)
@@ -54,7 +54,10 @@ import Ledger.Validate
 import Network.HTTP.Types.Header (hContentType)
 import Network.HTTP.Types.Status
 import Network.Socket (SockAddr (..), hostAddress6ToTuple, hostAddressToTuple)
-import Network.Wai (Application, Request, Response, isSecure, remoteHost, requestHeaders, responseLBS)
+import Network.Wai (Application, Request, Response, isSecure, mapResponseHeaders, rawPathInfo, remoteHost, requestHeaders, requestMethod, responseLBS)
+import Crypto.Random (getRandomBytes)
+import Data.ByteArray.Encoding (Base (..), convertToBase)
+import System.Timeout (timeout)
 import Network.Wai.Middleware.AddHeaders (addHeaders)
 import Network.Wai.Middleware.RequestSizeLimit
 import System.IO (hPutStrLn, stderr)
@@ -145,7 +148,7 @@ limitBodySize =
         setMaxLengthForRequest (\_request -> pure (Just 65536)) defaultRequestSizeLimitSettings
     )
   where
-    tooLarge = jsonErrorResponse status413 "payload_too_large" "Request body must be at most 64 KB."
+    tooLarge = jsonErrorResponse status413 (ErrorBody "payload_too_large" "Request body must be at most 64 KB." Nothing)
 
 -- | If a handler crashes (the database is down, a bug...), answer with the
 -- same JSON error shape as every other error instead of a plain-text 500,
@@ -154,18 +157,49 @@ limitBodySize =
 -- An Application is a function "request -> respond -> IO ResponseReceived",
 -- so wrapping one is just writing another function that calls it inside
 -- "catch", Haskell's try/catch.
+--
+-- Two kinds of failure get different answers:
+--
+--   * StoreUnavailable (the database can't be reached, or a query timed
+--     out): 503 with Retry-After. It's temporary; trying again is right.
+--   * anything else: 500. That's a bug.
+--
+-- Both get a short random request id, written to the log with the method
+-- and path and returned in the error body, so "it failed, reference
+-- 3f9a1c2b" can be found in the logs.
 jsonErrorsFor500 :: Application -> Application
 jsonErrorsFor500 inner httpRequest respond =
   inner httpRequest respond `catch` \e -> do
+    requestId <- newRequestId
     -- The type annotation says which exceptions to catch: all of them.
-    hPutStrLn stderr ("Unhandled error: " <> show (e :: SomeException))
-    respond (jsonErrorResponse status500 "internal_error" "Something went wrong on our side. Please try again.")
+    hPutStrLn stderr $
+      "[" <> T.unpack requestId <> "] " <> show (requestMethod httpRequest) <> " "
+        <> show (rawPathInfo httpRequest) <> ": " <> show (e :: SomeException)
+    -- fromException asks "is this exception a StoreUnavailable?"
+    respond $ case fromException e of
+      Just (StoreUnavailable _) ->
+        mapResponseHeaders (("Retry-After", "5") :) $
+          jsonErrorResponse
+            status503
+            (ErrorBody "service_unavailable" "The service is temporarily unavailable. Please try again in a moment." (Just requestId))
+      Nothing ->
+        jsonErrorResponse
+          status500
+          (ErrorBody "internal_error" "Something went wrong on our side. Please try again." (Just requestId))
+
+-- | 8 random hex characters, e.g. "3f9a1c2b": enough to find one log line.
+newRequestId :: IO Text
+newRequestId = do
+  bytes <- getRandomBytes 4 :: IO BS.ByteString
+  pure (decodeUtf8Lenient (convertToBase Base16 bytes))
+  where
+    decodeUtf8Lenient = fromRight "" . decodeUtf8'
 
 -- | A complete JSON error response, for code outside Scotty's handlers.
 -- Same { "error", "message" } shape as failWith below.
-jsonErrorResponse :: Status -> Text -> Text -> Response
-jsonErrorResponse st code msg =
-  responseLBS st [(hContentType, "application/json")] (encode (ErrorBody code msg))
+jsonErrorResponse :: Status -> ErrorBody -> Response
+jsonErrorResponse st errorBody =
+  responseLBS st [(hContentType, "application/json")] (encode errorBody)
 
 -- | The routing table, like app.get(...) / app.post(...) in Express.
 -- Each route is a "do" block: a sequence of steps that ends in a response.
@@ -174,7 +208,18 @@ routes = do
   -- "object [...]" builds a JSON object; ".=" pairs a key with a value.
   -- ("ok" :: Text) says which string type we mean, since
   -- OverloadedStrings makes the literal ambiguous here.
-  get "/api/health" $ json (object ["status" .= ("ok" :: Text)])
+  -- Checks the store can be reached (the database, in production), so a
+  -- load balancer or Fly.io stops sending traffic to an instance whose
+  -- database is gone. timeout gives up after 2 seconds.
+  get "/api/health" $ do
+    store <- lift (asks envStore)
+    -- try catches only StoreUnavailable: any other failure is a bug and
+    -- should reach the crash handler like everywhere else.
+    reachable <- liftIO (try (timeout 2000000 (storePing store)) :: IO (Either StoreUnavailable (Maybe ())))
+    case reachable of
+      Right (Just ()) -> json (HealthView "ok")
+      -- Left: the ping threw (StoreUnavailable); Right Nothing: too slow.
+      _ -> status status503 >> json (HealthView "unavailable")
 
   -- Logging in and out ----------------------------------------------------
 
@@ -659,4 +704,4 @@ requireValid code = either (\msg -> failWith status400 code msg >> finish) pure
 -- | Send an error response: { "error": "<code>", "message": "<text>" }.
 -- The front end shows "message"; code can branch on "error".
 failWith :: Status -> Text -> Text -> Handler ()
-failWith st code msg = status st >> json (ErrorBody code msg)
+failWith st code msg = status st >> json (ErrorBody code msg Nothing)

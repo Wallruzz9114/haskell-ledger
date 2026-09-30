@@ -13,7 +13,7 @@ import Control.Monad (forM_)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import Ledger.Db (newDbPool, runMigrations)
+import Ledger.Db (newDbPool, runMigrations, waitForDatabase)
 import Ledger.Money (formatCents)
 import Ledger.Seed (defaultDemoPassword, demoTransfers, demoUsers, seedDemoData)
 import Ledger.Store
@@ -36,6 +36,9 @@ main = do
       exitFailure
     Just url -> do
       pool <- newDbPool (BS.pack url)
+      -- A database that's still starting (or waking from sleep) is normal
+      -- at startup: wait for it instead of exiting on the first failure.
+      waitForDatabase pool
       applied <- runMigrations pool
       forM_ applied $ \name -> putStrLn ("Applied migration " <> name)
       let store = newPostgresStore pool

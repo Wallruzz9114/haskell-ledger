@@ -117,11 +117,11 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 130 examples, 0 failures, 1 pending
+# 136 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 144 examples, 0 failures
+# 153 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
@@ -136,6 +136,7 @@ The tests are split by area under `backend/test`:
 | `Ledger/MoneySpec.hs` | `mkAmount` (including the maximum amount) and `formatCents` |
 | `Ledger/ValidateSpec.hs` | The rules for account ids and names, memos and idempotency keys |
 | `Ledger/ReportsSpec.hs` | Dashboard totals (money in/out ignore transfers between your own accounts), the balance series, search and paging, including QuickCheck properties: the chart always ends at today's total, and paging visits every transaction exactly once |
+| `Ledger/DbSpec.hs` | The startup retry: keeps trying, gives up after the limit, and never retries a different kind of error |
 | `Ledger/MigrationsSpec.hs` | Every SQL file in `db/migrations` is listed in `Ledger.Db` |
 | `Ledger/TypeScriptSpec.hs` | The generated TypeScript types match the Haskell ones |
 | `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, gives each account the right owner, is dated July to September in order, and seeding twice changes nothing |
@@ -159,7 +160,8 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 | File | What it tests |
 | --- | --- |
 | `src/app/money.test.ts` | Formatting cents and parsing typed amounts, with no floating-point rounding and the API's maximum |
-| `src/app/api.test.ts` | Reading error messages and 401s from API responses |
+| `src/app/api.test.ts` | Reading error messages (with the reference for unexpected failures) and 401s from API responses |
+| `src/app/ErrorBoundary.test.tsx` | A crash while rendering shows a message and a Reload button, not a blank page |
 | `src/app/idempotency.test.ts` | Idempotency keys: valid UUIDs, never repeated, and made without `crypto.randomUUID` so plain-HTTP pages work |
 | `src/features/dashboard/DashboardPage.test.tsx` | The total, money in/out with names, switching months, reading the chart with the keyboard, and its table view |
 | `src/features/dashboard/format.test.ts` | Day and month labels (no time-zone shift), axis labels, and axis ticks that always cover the data |
@@ -170,6 +172,17 @@ The front end has its own Vitest suite (`cd web && npm test`), with one test fil
 | `src/features/accounts/AccountEntries.test.tsx` | Each entry's counterparty ("To"/"From"), memo, date and signed amount |
 | `src/features/transfers/TransferForm.test.tsx` | Only your own accounts to send from; amounts sent in cents; the same `Idempotency-Key` on an unchanged retry but a new one once the details change (so editing a refused transfer isn't a 409); API errors shown |
 | `src/features/transfers/DepositForm.test.tsx` | Deposits: customer accounts only, and the same key rules as transfers |
+
+## When things go wrong
+
+- **Business errors are values.** A refused transfer is a `TransferError`, turned into an HTTP status in one place, and the compiler warns if a new kind isn't handled.
+- **Temporary outages are told apart from bugs.** The Postgres store turns "can't reach the database" (a refused connection, a dropped connection, a server shutting down, or a query past the 5-second statement timeout) into `StoreUnavailable`. The API answers `503` with `Retry-After` for that, and `500` only for real bugs. Broken connections are dropped from the pool, so the API recovers as soon as the database is back, without a restart.
+- **Every unexpected failure is traceable.** It gets a request id, returned in the response and written to the log with the method and path.
+- **The health check tells the truth.** `/api/health` pings the database and answers `503` when it can't, so a load balancer stops sending traffic to a broken instance.
+- **Startup waits for the database.** The API and `ledger-seed` retry for about 40 seconds (useful when a database is still starting or waking from sleep) instead of exiting on the first failure.
+- **The front end always offers a way forward.** API messages are shown as they come, with the reference for unexpected failures. A 401 returns to the login page, failed loads have a Try again button, and a crash while rendering shows a message and a Reload button instead of a blank page (a React error boundary).
+
+These are tested, including against a real Postgres: the statement timeout, an unreachable database, ordinary SQL errors *not* being treated as outages, the startup retry, the 503 and health responses, the error boundary, and each retry button.
 
 ## Continuous integration
 
@@ -448,7 +461,7 @@ Every endpoint except `/api/health` and `/api/login` needs a logged-in session (
 
 | Method | Path | Who | Description | Success |
 | --- | --- | --- | --- | --- |
-| `GET` | `/api/health` | anyone | Health check | 200 |
+| `GET` | `/api/health` | anyone | Health check: `{"status": "ok"}`, or `503` with `"unavailable"` when the database can't be reached | 200 |
 | `POST` | `/api/login` | anyone | Log in: `{ "username", "password" }`. Sets the session cookie and returns `{ "username", "role" }`. | 200 |
 | `POST` | `/api/logout` | anyone | End the session and clear the cookie | 204 |
 | `GET` | `/api/me` | logged in | The logged-in user: `{ "username", "role" }` | 200 |
@@ -493,7 +506,7 @@ Input rules:
 | `Idempotency-Key` header | 1 to 255 visible ASCII characters, no spaces. A UUID works well. |
 | Request body | At most 64 KB |
 
-Errors come back as `{ "error": "<code>", "message": "<text>" }`:
+Errors come back as `{ "error": "<code>", "message": "<text>" }`. Unexpected failures (500 and 503) also include a `"requestId"`, which appears in the server's log line for that request, so a reported problem can be traced. The front end shows it as a reference.
 
 | Status | `error` | When |
 | --- | --- | --- |
@@ -518,7 +531,8 @@ Errors come back as `{ "error": "<code>", "message": "<text>" }`:
 | 422 | `insufficient_funds` | The transfer would take a customer account below zero |
 | 422 | `system_account` | Trying to give a system account (like `external`) an owner |
 | 429 | `too_many_attempts` | Too many failed logins for that username (5 per 15 minutes) or from that address (30 per 15 minutes). `Retry-After` says when to try again. |
-| 500 | `internal_error` | Something failed on the server (for example, the database is down). Details are logged on the server, never sent to the client. |
+| 500 | `internal_error` | A bug on the server. Details are logged on the server, never sent to the client. |
+| 503 | `service_unavailable` | The database can't be reached right now, or a query ran past its 5-second limit. Temporary: `Retry-After` says when to try again. |
 | 503 | `login_busy` | Every password-check slot is busy (see [Security](#security)). `Retry-After: 1`. |
 
 ## Security
