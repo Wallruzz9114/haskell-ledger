@@ -189,13 +189,18 @@ export function isUnauthorized(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'status' in err && err.status === 401
 }
 
-/** Pull the human-readable message out of an RTK Query error. */
+/**
+ * Pull the human-readable message out of an RTK Query error. Unexpected
+ * failures carry a request id, shown as a reference that matches the
+ * server's log line.
+ */
 export function errorMessage(err: unknown): string | null {
   if (!err) return null
   if (typeof err === 'object' && err !== null && 'data' in err) {
     const data = (err as { data: unknown }).data
     if (data && typeof data === 'object' && 'message' in data) {
-      return (data as ApiError).message
+      const { message, requestId } = data as ApiError
+      return requestId ? `${message} (reference ${requestId})` : message
     }
   }
   return "Couldn't reach the server. Check that the API is running, then try again."

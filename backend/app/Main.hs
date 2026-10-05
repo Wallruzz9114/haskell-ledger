@@ -10,7 +10,7 @@ import Control.Monad (forM_, unless)
 import qualified Data.ByteString.Char8 as BS
 import Data.Maybe (fromMaybe, isNothing)
 import Ledger.App (CookiePolicy (..), app, newEnv)
-import Ledger.Db (newDbPool, runMigrations)
+import Ledger.Db (newDbPool, runMigrations, waitForDatabase)
 import Ledger.Seed (defaultDemoPassword, ensureSystemAccounts, seedDemoData)
 import qualified Data.Text as T
 import Ledger.Store
@@ -75,6 +75,9 @@ storesFromEnvironment = do
     Just url -> do
       -- BS.pack turns the String into the bytes postgresql-simple expects.
       pool <- newDbPool (BS.pack url)
+      -- A database that's still starting (or waking from sleep) is normal
+      -- at startup: wait for it instead of exiting on the first failure.
+      waitForDatabase pool
       applied <- runMigrations pool
       forM_ applied $ \name -> putStrLn ("Applied migration " <> name)
       let store = newPostgresStore pool
