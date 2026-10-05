@@ -10,6 +10,7 @@ module Ledger.Auth
   , canOpenAccountFor
   , canSeeAllAccounts
   , canAssignOwners
+  , inOverview
   ) where
 
 import Ledger.Types
@@ -40,6 +41,15 @@ canSeeAllAccounts = isAdmin
 -- | Only admins can give an account an owner (or move it to another user).
 canAssignOwners :: User -> Bool
 canAssignOwners = isAdmin
+
+-- | Which accounts the dashboard and transactions page cover: a customer's
+-- own accounts, or every customer account for an admin. System accounts
+-- like "external" are never included: they're the outside world, not
+-- anyone's money.
+inOverview :: User -> Account -> Bool
+inOverview user account
+  | isAdmin user = accountKind account == Customer
+  | otherwise = owns user account
 
 -- Helpers ------------------------------------------------------------------
 

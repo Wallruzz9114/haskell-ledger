@@ -78,24 +78,8 @@ newPostgresStore pool =
         if null exists
           then pure Nothing
           else do
-            -- Each entry, joined with its transfer for the memo and time.
-            -- The counterparty is whichever end of the transfer ISN'T this
-            -- account: CASE is SQL's if/else.
-            rows <-
-              query
-                conn
-                "SELECT e.transfer_id, e.account_id, e.amount, \
-                \CASE WHEN t.from_account = e.account_id THEN t.to_account ELSE t.from_account END, \
-                \t.memo, t.created_at \
-                \FROM entries e JOIN transfers t ON t.id = e.transfer_id \
-                \WHERE e.account_id = ? ORDER BY e.id DESC"
-                (Only (accountIdText aid))
-            pure
-              ( Just
-                  [ Entry (TransferId t) (AccountId a) (Cents n) (AccountId other) memo at
-                  | (t, a, n, other, memo, at) <- rows
-                  ]
-              )
+            Just <$> entriesOn conn [aid]
+    , storeEntriesFor = \aids -> withConn (`entriesOn` aids)
     , storeTransfer = transferWithTime Nothing
     , storeTransferAt = transferWithTime . Just
     }
@@ -175,6 +159,27 @@ newPostgresUserStore pool =
         _ <- execute conn "DELETE FROM sessions WHERE token_hash = ?" (Only (Binary token))
         pure ()
     }
+
+-- | Every entry on these accounts, newest first, each joined with its
+-- transfer for the memo and time. The counterparty is whichever end of the
+-- transfer ISN'T the entry's account: CASE is SQL's if/else.
+-- "In aids" expands to a SQL list: account_id IN ('a', 'b', ...).
+entriesOn :: Connection -> [AccountId] -> IO [Entry]
+entriesOn _ [] = pure []
+entriesOn conn aids = do
+  rows <-
+    query
+      conn
+      "SELECT e.transfer_id, e.account_id, e.amount, \
+      \CASE WHEN t.from_account = e.account_id THEN t.to_account ELSE t.from_account END, \
+      \t.memo, t.created_at \
+      \FROM entries e JOIN transfers t ON t.id = e.transfer_id \
+      \WHERE e.account_id IN ? ORDER BY e.id DESC"
+      (Only (In (map accountIdText aids)))
+  pure
+    [ Entry (TransferId t) (AccountId a) (Cents n) (AccountId other) memo at
+    | (t, a, n, other, memo, at) <- rows
+    ]
 
 -- | Validate and apply one transfer inside an open transaction.
 transferIn :: Connection -> Maybe UTCTime -> TransferRequest -> IO (Either TransferError Transfer)

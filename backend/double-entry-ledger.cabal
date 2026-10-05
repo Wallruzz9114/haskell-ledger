@@ -41,6 +41,7 @@ library
       Ledger.Db
       Ledger.JsonOptions
       Ledger.Money
+      Ledger.Reports
       Ledger.Seed
       Ledger.Session
       Ledger.Store
@@ -123,6 +124,7 @@ test-suite spec
       Ledger.InvariantsSpec
       Ledger.MigrationsSpec
       Ledger.MoneySpec
+      Ledger.ReportsSpec
       Ledger.SeedSpec
       Ledger.SessionSpec
       Ledger.Store.PostgresSpec
