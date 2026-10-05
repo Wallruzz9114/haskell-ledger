@@ -375,7 +375,9 @@ th {
 
 .month-switcher h2 {
   margin: 0;
-  min-width: 11ch;
+  /* Wide enough for the longest name ("September 2026"), so the "next"
+     button doesn't move as the month changes. */
+  min-width: 9.5em;
   text-align: center;
 }
 

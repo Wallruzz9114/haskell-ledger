@@ -15,7 +15,8 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Ledger.Db (newDbPool, runMigrations, waitForDatabase)
 import Ledger.Money (formatCents)
-import Ledger.Seed (defaultDemoPassword, demoTransfers, demoUsers, seedDemoData)
+import Data.Time (getCurrentTime)
+import Ledger.Seed (defaultDemoPassword, demoTransfersUpTo, demoUsers, seedDemoDataAt)
 import Ledger.Store
 import Ledger.Store.Postgres (newPostgresStore, newPostgresUserStore)
 import Ledger.Types
@@ -45,8 +46,10 @@ main = do
       -- DEMO_PASSWORD sets the demo users' password; only used for users
       -- that don't exist yet.
       password <- maybe defaultDemoPassword T.pack <$> lookupEnv "DEMO_PASSWORD"
-      seedDemoData password store (newPostgresUserStore pool)
-      putStrLn ("Seeded " <> show (length demoUsers) <> " demo users and " <> show (length demoTransfers) <> " demo transfers (already-seeded ones are skipped).")
+      -- The demo history runs up to today (see Ledger.Seed).
+      now <- getCurrentTime
+      seedDemoDataAt now password store (newPostgresUserStore pool)
+      putStrLn ("Seeded " <> show (length demoUsers) <> " demo users and " <> show (length (demoTransfersUpTo now)) <> " demo transfers (already-seeded ones are skipped).")
       putStrLn ""
       accounts <- storeListAccounts store
       forM_ accounts $ \(account, balance) -> do

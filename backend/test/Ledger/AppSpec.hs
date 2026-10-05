@@ -20,8 +20,9 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
+import Data.Time (UTCTime (..), fromGregorian)
 import Ledger.App (CookiePolicy (..), app, newEnv)
-import Ledger.Seed (seedDemoData)
+import Ledger.Seed (seedDemoDataAt)
 import Ledger.Session (hashPassword)
 import Ledger.Store
 import Ledger.Types
@@ -103,15 +104,23 @@ spec = do
       liftIO $ do
         simpleStatus response `shouldBe` status200
         let field name = decode (simpleBody response) >>= Map.lookup (name :: Text) :: Maybe Value
-        -- alice's four accounts: 28,253 + 1,500 + 6,000 + 4,160 dollars.
-        field "totalBalanceCents" `shouldBe` Just (Number 3991300)
+        -- Seeded on October 5 (see demoApp): July to September, plus
+        -- October's first client payment and software bill. Each month
+        -- leaves alice with her client payments minus software 129,
+        -- Globex's invoice 3,200 and the payroll run 11,500 dollars:
+        --   July 30,900 - 14,829 = 16,071
+        --   August 30,250 - 14,829 = 15,421
+        --   September 33,250 - 14,829 - Q3 tax 9,525 = 8,896
+        --   October so far 18,500 - 129 = 18,371
+        field "totalBalanceCents" `shouldBe` Just (Number 5875900)
         field "month" `shouldBe` Just (String "2026-09")
         -- September in: two client payments (20,150 + 13,100 dollars).
         -- Out: software 129, Globex's invoice 3,200, the payroll run
-        -- 11,500 and the Q3 tax 10,000. Transfers between her own accounts
-        -- (tax set-aside, savings, payroll funding) don't count.
+        -- 11,500 and the Q3 tax (August's and September's set-asides,
+        -- 4,537.50 + 4,987.50). Transfers between her own accounts (tax
+        -- set-aside, savings, payroll funding) don't count.
         field "moneyInCents" `shouldBe` Just (Number 3325000)
-        field "moneyOutCents" `shouldBe` Just (Number 2482900)
+        field "moneyOutCents" `shouldBe` Just (Number 2435400)
         case field "series" of
           Just (Array points) -> length points `shouldBe` 90
           other -> expectationFailure ("no series: " <> show other)
@@ -343,7 +352,9 @@ spec = do
 
 -- Apps under test ---------------------------------------------------------------
 
--- | The API over fresh in-memory stores with the demo data and demo users.
+-- | The API over fresh in-memory stores with the demo data and demo users,
+-- seeded as if today were October 5, 2026 at noon in Denver, so the
+-- numbers in these tests don't change with the date they run on.
 demoApp :: IO Application
 demoApp = demoAppWith False
 
@@ -352,7 +363,7 @@ demoAppWith :: Bool -> IO Application
 demoAppWith trustProxy = do
   store <- newInMemoryStore
   users <- newInMemoryUserStore
-  seedDemoData "test-password" store users
+  seedDemoDataAt (UTCTime (fromGregorian 2026 10 5) (18 * 3600)) "test-password" store users
   app =<< newEnv store users SecureOverHttps trustProxy
 
 -- | A working login, but a ledger store where every operation throws,
