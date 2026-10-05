@@ -33,9 +33,22 @@ A full-stack double-entry ledger: a Haskell API that moves money between account
 | `Ledger.Session` | Argon2 password hashing, and random session tokens stored only as SHA-256 hashes. |
 | `Ledger.Throttle` | Login protection: failed-attempt limits per username and per address, and a cap on password checks running at once. |
 | `Ledger.Seed` | The `external` account every ledger needs, and the demo users and data. |
+| `Ledger.Api` | The shape of every API request and response, with matching TypeScript types generated from the same definitions (see below). |
 | `Ledger.App` | HTTP layer (Scotty): logins, permission checks, and the only place domain errors become status codes. |
 
 The API uses Postgres when `DATABASE_URL` is set, and the in-memory store otherwise. Only the two programs' `Main` modules choose a store; nothing else knows which one it's using.
+
+### One set of types for Haskell and TypeScript
+
+The front end doesn't describe the API's JSON by hand. `Ledger.Api` defines every request and response as a Haskell record and derives, from the same settings, both its JSON encoding ([aeson](https://hackage.haskell.org/package/aeson)) and a TypeScript type ([aeson-typescript](https://hackage.haskell.org/package/aeson-typescript)). A small program writes those types to [`web/src/app/generated/apiTypes.ts`](web/src/app/generated/apiTypes.ts), and the front end imports them.
+
+So a change on one side can't silently break the other. Renaming a field in Haskell (`balanceCents` to `balance`, say) and regenerating makes the front end fail to compile, with an error at every place that uses the old name, instead of showing `$NaN` at runtime. If someone changes the Haskell types but forgets to regenerate, a backend test (`TypeScriptSpec`) fails in CI.
+
+After changing a type in `Ledger.Api` (or one it uses), regenerate from the repository root:
+
+```sh
+cabal run -v0 ledger-typescript > web/src/app/generated/apiTypes.ts
+```
 
 ## Tests
 
@@ -62,11 +75,11 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 111 examples, 0 failures, 1 pending
+# 112 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 124 examples, 0 failures
+# 125 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
@@ -81,6 +94,7 @@ The tests are split by area under `backend/test`:
 | `Ledger/MoneySpec.hs` | `mkAmount` (including the maximum amount) and `formatCents` |
 | `Ledger/ValidateSpec.hs` | The rules for account ids and names, memos and idempotency keys |
 | `Ledger/MigrationsSpec.hs` | Every SQL file in `db/migrations` is listed in `Ledger.Db` |
+| `Ledger/TypeScriptSpec.hs` | The generated TypeScript types match the Haskell ones |
 | `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, gives each account the right owner, is dated July to September in order, and seeding twice changes nothing |
 | `Ledger/CoreSpec.hs` | `checkTransfer`, `applyTransfer` and `openAccount` examples |
 | `Ledger/InvariantsSpec.hs` | The QuickCheck properties |
@@ -503,6 +517,7 @@ haskell-ledger/
     Dockerfile               # builds the API image (ledger-api and ledger-seed)
     app/Main.hs              # the API server: picks a store, starts the server
     seed/Main.hs             # the ledger-seed command: adds demo data to DATABASE_URL
+    typegen/Main.hs          # the ledger-typescript command: writes the front end's API types
     src/Ledger/*.hs          # the library (see Design)
     db/migrations/*.sql      # schema changes, applied in order at startup
     db/docker-init/          # run by the Postgres container on first start: creates ledger_test
@@ -512,6 +527,7 @@ haskell-ledger/
     Dockerfile               # builds the app with Node, serves it with nginx
     nginx.conf               # serves the app, forwards /api to the api service
     src/app/                 # API client (RTK Query), Redux store, money helpers
+    src/app/generated/       # API types generated from Haskell (don't edit by hand)
     src/features/            # auth, accounts and transfers components, each with its tests
     src/index.css            # styles
   .github/workflows/ci.yml   # CI: build, lint and test both halves on every PR

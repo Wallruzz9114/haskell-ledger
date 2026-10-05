@@ -81,7 +81,7 @@ jobs:
       - name: hlint
         uses: haskell-actions/hlint-run@v2
         with:
-          path: '["backend/src/", "backend/app/", "backend/seed/", "backend/test/"]'
+          path: '["backend/src/", "backend/app/", "backend/seed/", "backend/typegen/", "backend/test/"]'
           fail-on: suggestion
 
       - name: Test (including the Postgres store)

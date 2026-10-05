@@ -22,6 +22,7 @@ module Ledger.Types
   , TransferRequest (..)
   , TransferError (..)
   , OpenAccountError (..)
+  , stripPrefix
   , Username (..)
   , Role (..)
   , User (..)
@@ -67,9 +68,11 @@ instance FromJSON AccountId
 data AccountKind = Customer | External
   deriving (Eq, Show, Generic)
 
--- Only ToJSON, no FromJSON: the API sends account kinds out but never reads
--- them in, so we don't create a parser we don't need.
 instance ToJSON AccountKind
+
+-- The API sends account kinds out; the parser exists so the API's records
+-- in Ledger.Api can derive their own parsers (and so tests can read them).
+instance FromJSON AccountKind
 
 -- | A record: a type with named fields, like a TypeScript interface.
 --
