@@ -8,6 +8,13 @@ A full-stack double-entry ledger: a Haskell API that moves money between account
 >
 > Built step by step while learning Haskell, so every source file carries beginner-level comments explaining the Haskell it uses.
 
+![The dashboard: total balance, a 90-day balance chart with a hover tooltip, and this month's money in and out](docs/screenshots/dashboard.png)
+
+<p>
+  <img src="docs/screenshots/transactions.png" alt="The transactions page: every entry with the other side's name, memo, time and amount, with search and an account filter" width="64%">
+  <img src="docs/screenshots/phone-dark.png" alt="The dashboard on a phone, in dark mode" width="30%">
+</p>
+
 ## What it does
 
 - **Double-entry bookkeeping.** Every transfer writes two entries, a debit and a credit, that sum to zero. An account's balance is the sum of its entries.
@@ -117,11 +124,11 @@ The Postgres tests run when `TEST_DATABASE_URL` is set, and are marked pending o
 ```sh
 cd backend
 cabal test --test-show-details=direct
-# 137 examples, 0 failures, 1 pending
+# 139 examples, 0 failures, 1 pending
 
 TEST_DATABASE_URL=postgresql://ledger:ledger@localhost:5434/ledger_test \
   cabal test --test-show-details=direct
-# 153 examples, 0 failures
+# 155 examples, 0 failures
 ```
 
 The tests are split by area under `backend/test`:
@@ -139,7 +146,7 @@ The tests are split by area under `backend/test`:
 | `Ledger/DbSpec.hs` | The startup retry: keeps trying, gives up after the limit, and never retries a different kind of error |
 | `Ledger/MigrationsSpec.hs` | Every SQL file in `db/migrations` is listed in `Ledger.Db` |
 | `Ledger/TypeScriptSpec.hs` | The generated TypeScript types match the Haskell ones |
-| `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, gives each account the right owner, is dated July to September in order, and seeding twice changes nothing |
+| `Ledger/SeedSpec.hs` | The demo data applies cleanly, keeps every rule, gives each account the right owner, is dated over the last three months up to today with nothing in the future, applies cleanly whatever day it first runs, adds only newer transfers when run again later, and seeding twice changes nothing |
 | `Ledger/CoreSpec.hs` | `checkTransfer`, `applyTransfer` and `openAccount` examples |
 | `Ledger/InvariantsSpec.hs` | The QuickCheck properties |
 | `Ledger/StoreSpec.hs` | The store contract against the in-memory store |
@@ -283,21 +290,13 @@ Demo users (all with the password `ledger-demo-2026`, or whatever `DEMO_PASSWORD
 
 These passwords are published here, so they're for local demos only.
 
-The demo data is three months (July to September 2026) of activity for two companies: 37 transfers in all, each dated on its own day during business hours, so the entries view reads like a real history.
+The demo data is a running history for two companies: the three whole months before today, plus this month so far, so the dashboard always has something to show and nothing is dated in the future. Each transfer is dated on its own day during business hours, so the entries view reads like a real history.
 
 - **Money coming in:** client payments into `acme-ops` and `globex-ops`.
 - **Regular costs:** monthly payroll funding and payroll runs, rent and software subscriptions.
-- **Moving money around:** a 15% tax set-aside into `acme-tax`, savings transfers, Acme paying Globex's invoices, and a Q3 estimated tax payment in September.
+- **Moving money around:** a 15% tax set-aside into `acme-tax`, savings transfers, Acme paying Globex's invoices, and an estimated tax payment at the end of each quarter.
 
-| Account | Balance after seeding |
-| --- | --- |
-| `acme-ops` | $28,253.00 |
-| `acme-payroll` | $1,500.00 |
-| `acme-savings` | $6,000.00 |
-| `acme-tax` | $4,160.00 |
-| `external` | -$75,013.00 |
-| `globex-ops` | $34,500.00 |
-| `globex-payroll` | $600.00 |
+Each month's transfers depend only on which month it is, so running `ledger-seed` again weeks later adds just the transfers dated since; nothing is moved twice. Balances therefore depend on the day you seed. For a fresh history dated from today, reset the database (`docker compose down -v`, then `up` again).
 
 `external` is negative because it's where money enters and leaves the ledger. All balances always sum to zero. The data is defined in [`backend/src/Ledger/Seed.hs`](backend/src/Ledger/Seed.hs).
 
@@ -544,11 +543,11 @@ Errors come back as `{ "error": "<code>", "message": "<text>" }`. Unexpected fai
 
   The counts live in the server's memory: they're per process and reset on restart. Several servers behind a load balancer would need a shared store for them. Behind a reverse proxy, set `TRUST_PROXY=true` so addresses come from `X-Forwarded-For`; otherwise every user seems to share the proxy's address.
 - **Sessions:** logging in creates 32 random bytes as a session token, sent to the browser in a cookie. The database stores only the token's SHA-256 hash, so a stolen `sessions` table can't be turned into working cookies. Sessions last 7 days, logging out deletes the session on the server, and expired sessions are cleaned up.
-- **The session cookie** is `HttpOnly` (JavaScript can't read it, so an XSS bug can't steal it) and `SameSite=Lax` (other websites can't make the browser send it with their POST requests). It's `Secure` (HTTPS only) whenever the request came over HTTPS, without any setting to remember.
+- **The session cookie** is `HttpOnly` (JavaScript can't read it, so an XSS bug can't steal it) and `SameSite=Lax` (other websites can't make the browser send it with their POST requests). It's `Secure` (HTTPS only) whenever the request came over HTTPS, without any setting to remember. That includes hosting where a load balancer ends HTTPS before nginx: nginx passes on the original `X-Forwarded-Proto` instead of its own `http`.
 - **Cross-site request forgery.** Besides `SameSite=Lax`, request bodies must be `application/json`. A form on another website can't send that without the browser asking this server first, which it never allows. That still holds where `SameSite` doesn't help, for example from a sibling subdomain.
 - **No caching.** Every response carries `Cache-Control: no-store`, so browsers and shared proxies don't keep copies of account data.
 - **Permissions** live in one small pure module, `Ledger.Auth`, and are checked in `Ledger.App` before the store is touched. Customers' account lists are filtered by the database.
-- **Idempotency keys are per user.** They're stored as `user:<name>:<key>`, so `payroll-1` from alice and from bob are different keys, and neither can collide with the seed's `seed:...` keys.
+- **Idempotency keys are per user.** They're stored as `user:<name>:<key>`, so `payroll-1` from alice and from bob are different keys, and neither can collide with the seed's `demo:...` keys.
 
 Known limits:
 
